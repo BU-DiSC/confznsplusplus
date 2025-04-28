@@ -1,6 +1,20 @@
 #ifndef __FEMU_ZNS_H
 #define __FEMU_ZNS_H
+#include <stdio.h>
+#include <stdlib.h>
 #include "../nvme.h"
+#include "mosek.h"
+
+
+// chunk is an erase block in our initial implementation, however it can represent sequence of erase blocks too
+// Logical Unit (LUN) is a plane in initial implementaiton but can represent die, chip etc.
+
+#define NUM_LUNS 32 // L
+#define CHUNKS_PER_LUN 4 // M
+#define ZONE_CHUNKS 64 // Z: total chunks to select for a zone
+#define TOTAL_CHUNKS (NUM_LUNS * CHUNKS_PER_LUN) // N
+#define MAX_CHUNKS_PER_LUN 2 // G: maximum number of chunks that one LUN is allowed to contribute
+#define MIN_LUNS 32 // K: minimum number of LUNS that must contribute to the zone
 
 #define _64KB   (64 * KiB)
 #define _16KB   (16 * KiB)
@@ -75,6 +89,8 @@ typedef struct zns {
     struct NvmeZone *zone_array;
     struct zns_vtable_entry *ventry;
     uint32_t num_zones;
+    uint64_t availability[NUM_LUNS][CHUNKS_PER_LUN];
+    uint64_t wear[NUM_LUNS][CHUNKS_PER_LUN];
     /* lockless ring for communication with NVMe IO thread */
 
     QemuThread zns_thread;
@@ -181,6 +197,10 @@ typedef struct QEMU_PACKED NvmeIdNsZoned {
 typedef struct NvmeZone {
     NvmeZoneDescr   d;
     uint64_t        w_ptr;
+    uint64_t        f_pages;
+    uint64_t        f_plane;
+    uint64_t        f_written;
+    uint64_t        f_stripe;
     uint64_t        cnt_reset;
     pthread_spinlock_t w_ptr_lock;
     QTAILQ_ENTRY(NvmeZone) entry;
@@ -210,6 +230,8 @@ typedef struct zns_vtable_entry {
     NvmeZone logical_zone;
     NvmeZone *physical_zone;
     uint8_t status;
+    uint64_t selected_indices[NUM_LUNS][MAX_CHUNKS_PER_LUN];
+    uint64_t group_counts[NUM_LUNS];
 } zns_vtable_entry;
 
 typedef struct zns_vtable {
@@ -335,6 +357,11 @@ static inline void zns_aor_dec_active(NvmeNamespace *ns)
     }
     assert(n->nr_active_zones >= 0);
 }
+
+uint16_t zns_get_mgmt_zone_slba_idx(FemuCtrl *n, NvmeCmd *cmd,
+                                    uint64_t *slba,
+                                    uint32_t *logical_idx,
+                                    uint32_t *phys_idx);
 
 void zns_ns_shutdown(NvmeNamespace *ns);
 void zns_ns_cleanup(NvmeNamespace *ns);

@@ -693,7 +693,7 @@ static void femu_exit(PCIDevice *pci_dev)
 
 static Property femu_props[] = {
     DEFINE_PROP_STRING("serial", FemuCtrl, serial),
-    DEFINE_PROP_UINT32("devsz_mb", FemuCtrl, memsz, 1024), /* in MB */
+    DEFINE_PROP_UINT32("devsz_mb", FemuCtrl, memsz, 4096), /* in MB */
     DEFINE_PROP_UINT32("namespaces", FemuCtrl, num_namespaces, 1),
     DEFINE_PROP_UINT32("queues", FemuCtrl, num_io_queues, 16),
     DEFINE_PROP_UINT32("entries", FemuCtrl, max_q_ents, 0x7ff),
@@ -745,15 +745,15 @@ static Property femu_props[] = {
     DEFINE_PROP_UINT64("zns_block_erasure_latency", FemuCtrl, zns_params.blk_er_lat, 3000000),
     DEFINE_PROP_UINT64("zns_channel_transfer_latency", FemuCtrl, zns_params.ch_xfer_lat, 25000),
     // ZNS Geo
-    DEFINE_PROP_UINT64("zns_block_size_pages", FemuCtrl, zns_params.block_size, 256),
-    DEFINE_PROP_UINT64("zns_zonesize", FemuCtrl, zns_params.zone_size, (64 * MiB)),
+    DEFINE_PROP_UINT64("zns_block_size_pages", FemuCtrl, zns_params.block_size, 4),
+    DEFINE_PROP_UINT64("zns_zonesize", FemuCtrl, zns_params.zone_size, (4 * MiB)),
     DEFINE_PROP_UINT64("zns_zonecap", FemuCtrl, zns_params.zone_cap_param, 0),
-    DEFINE_PROP_UINT64("zns_channels", FemuCtrl, zns_params.nchnls, 16),
-    DEFINE_PROP_UINT64("zns_channels_per_zone", FemuCtrl, zns_params.chnls_per_zone, 8),
-    DEFINE_PROP_UINT64("zns_ways", FemuCtrl, zns_params.ways, 1U),
-    DEFINE_PROP_UINT64("zns_ways_per_zone", FemuCtrl, zns_params.ways_per_zone, 1U),
-    DEFINE_PROP_UINT64("zns_dies_per_chip", FemuCtrl, zns_params.dies_per_chip, 1U),
-    DEFINE_PROP_UINT64("zns_planes_per_die", FemuCtrl, zns_params.planes_per_die, 1U),
+    DEFINE_PROP_UINT64("zns_channels", FemuCtrl, zns_params.nchnls, 4),
+    DEFINE_PROP_UINT64("zns_channels_per_zone", FemuCtrl, zns_params.chnls_per_zone, 4),
+    DEFINE_PROP_UINT64("zns_ways", FemuCtrl, zns_params.ways, 2),
+    DEFINE_PROP_UINT64("zns_ways_per_zone", FemuCtrl, zns_params.ways_per_zone, 2),
+    DEFINE_PROP_UINT64("zns_dies_per_chip", FemuCtrl, zns_params.dies_per_chip, 1),
+    DEFINE_PROP_UINT64("zns_planes_per_die", FemuCtrl, zns_params.planes_per_die, 4),
     DEFINE_PROP_UINT64("zns_zasl", FemuCtrl, zns_params.zasl, (128ULL * KiB)),
     // ZNS modes
     DEFINE_PROP_UINT8("zns_allow_partial_resets", FemuCtrl, zns_params.allow_partial_zone_resets, 1),
