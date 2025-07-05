@@ -1,0 +1,66 @@
+{
+  "host": {
+    "c": {
+      "id": "gcc",
+      "exelist": [
+        "cc"
+      ],
+      "linker_exelist": [
+        "cc"
+      ],
+      "file_suffixes": [
+        "c"
+      ],
+      "default_suffix": "c",
+      "version": "11.4.0",
+      "full_version": "cc (Ubuntu 11.4.0-1ubuntu1~22.04) 11.4.0",
+      "linker_id": "ld.bfd"
+    },
+    "cpp": {
+      "id": "gcc",
+      "exelist": [
+        "c++"
+      ],
+      "linker_exelist": [
+        "c++"
+      ],
+      "file_suffixes": [
+        "cpp",
+        "cppm",
+        "cc",
+        "cxx",
+        "c++",
+        "hh",
+        "hpp",
+        "ipp",
+        "hxx",
+        "ino",
+        "ixx",
+        "C",
+        "H"
+      ],
+      "default_suffix": "cpp",
+      "version": "11.4.0",
+      "full_version": "c++ (Ubuntu 11.4.0-1ubuntu1~22.04) 11.4.0",
+      "linker_id": "ld.bfd"
+    }
+  },
+  "build": {
+    "c": {
+      "id": "gcc",
+      "exelist": [
+        "cc"
+      ],
+      "linker_exelist": [
+        "cc"
+      ],
+      "file_suffixes": [
+        "c"
+      ],
+      "default_suffix": "c",
+      "version": "11.4.0",
+      "full_version": "cc (Ubuntu 11.4.0-1ubuntu1~22.04) 11.4.0",
+      "linker_id": "ld.bfd"
+    }
+  }
+}

@@ -1235,7 +1235,6 @@ typedef struct ZNSParams {
     uint64_t dies_per_chip;
     uint64_t planes_per_die;      
     uint64_t csze_pages;        /* #of Pages in Chip (Inhoinno:I guess lun in femu)*/
-    uint64_t nchips;            /* # of chips in SSD*/
     uint64_t chnls_per_another_zone;    
     uint64_t pg_rd_lat;         /* NAND page read latency in nanoseconds */
     uint64_t pg_wr_lat;         /* NAND page program latency in nanoseconds */
@@ -1246,6 +1245,20 @@ typedef struct ZNSParams {
     uint64_t zone_cap_param;
     uint64_t block_size;        /* ZNS size of a block in pages */
     uint64_t blocks_per_die;
+
+    uint64_t total_chips;       /* # of chips in SSD*/
+    uint64_t total_planes;      /* # of planes in SSD*/
+    uint64_t total_blocks;      /* # of erase blocks in SSD*/
+    uint64_t total_stripes;     /* # of stripes in SSD*/
+    uint64_t block_chunks;      /* # Chunk can be 1 or more erase blocks depending on the configuration*/
+    uint64_t stripe_chunks;      /* # stripe chunks in stripe based allocation*/
+    uint64_t zone_stripe_chunks;      /* #zone stripe chunks*/
+    uint64_t zone_block_chunks; /* # Chunks per zone*/
+    uint64_t chunks_per_lun;
+    uint64_t max_chunks_per_lun;/* maximum number of chunks that the LUN may contribute*/
+    uint64_t min_luns;          /* minimum number of LUNS that have to contribute to the zone*/
+    uint64_t chunk_size;        /* stripe or block chunk size*/
+
     // erasure modes
     uint8_t allow_partial_zone_resets;
     uint8_t asynchronous_resets;

@@ -1,0 +1,2 @@
+/home/teona/CIDR/confznsplusplus/build-femu/meson-private/cmake_SDL2/CMakeFiles/edit_cache.dir
+/home/teona/CIDR/confznsplusplus/build-femu/meson-private/cmake_SDL2/CMakeFiles/rebuild_cache.dir

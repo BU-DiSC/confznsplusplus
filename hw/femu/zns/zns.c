@@ -6,10 +6,11 @@
 #define ZNS_INTERNAL_PAGE_SIZE (16 * KiB) // Internal mapped size, the flash page size
 #define ZNS_PAGE_PARALLELISM (ZNS_INTERNAL_PAGE_SIZE / ZNS_EXTERNAL_PAGE_SIZE) // How much parallel I/O fits in one flash page
 #define ZNS_ZASL_SIZE_BYTES (1 * MiB)
-#define ZNS_ZONE_SIZE_BYTES (2 * GiB)
+#define ZNS_ZONE_SIZE_BYTES (4 * MiB)
 #define ZNS_ZONE_SIZE_PAGES (ZNS_ZONE_SIZE_BYTES / ZNS_INTERNAL_PAGE_SIZE)
-//#define FINISH_BLOCK_SIZE ((ZNS_INTERNAL_PAGE_SIZE / 512ULL) * 64ULL)
 #define FINISH_BLOCK_SIZE ((ZNS_INTERNAL_PAGE_SIZE / 512ULL) * 16ULL)
+
+
 uint64_t lag = 0;
 uint64_t finishing = 0;
 
@@ -152,6 +153,422 @@ static inline void zns_set_physical_zone(NvmeNamespace *ns, zns_vtable_entry *ve
     }
 }
 
+int zns_flexible_block_striping(ZNS *zns, zns_vtable_entry *ventry) {
+    
+    ZNSParams *spp = &zns->sp;
+
+    printf("\n Availability array before mapping:\n");
+    for (int idx = 0; idx < spp->block_chunks; idx++) {
+        if (idx % spp->chunks_per_lun == 0)
+            printf("\n");
+        printf("%2d ", zns->availability_array[idx]);
+    }
+    printf("\n");
+
+    uint8_t* chunk_assignment = g_malloc0(sizeof(uint8_t) * spp->total_planes * spp->block_chunks);
+    int* indices = g_malloc0(sizeof(int) * (spp->block_chunks + 1));
+    double* coeffs = g_malloc0(sizeof(double) * (spp->block_chunks + 1));
+    int* indices1 = g_malloc0(sizeof(int) * spp->total_planes);
+    double* coeffs1 = g_malloc0(sizeof(double) * spp->total_planes);
+    int nvars = spp->block_chunks + spp->total_planes;
+    int ncons = 1 + spp->total_planes * 3 + 1; // total number of constraints
+
+    MSKenv_t env = NULL;
+    MSKtask_t task = NULL;
+    MSKrescodee r = MSK_RES_OK;
+
+    r = MSK_makeenv(&env, NULL);
+    if (r != MSK_RES_OK) return r;
+
+    r = MSK_maketask(env, ncons, nvars, &task);
+    if (r != MSK_RES_OK) return r;
+
+    MSK_putobjsense(task, MSK_OBJECTIVE_SENSE_MINIMIZE);
+    MSK_appendvars(task, nvars);
+
+    // Define c_n variables (chunk selection)
+    for (int n = 0; n < spp->block_chunks; n++) {
+        // Set up chunk membership in the plane e.g 111100000
+        int l = n / spp->chunks_per_lun;
+        int idx = l * spp->block_chunks + n;
+        chunk_assignment[idx] = 1;
+
+        MSK_putvartype(task, n, MSK_VAR_TYPE_INT);
+        if (zns->availability_array[n] == 1 || zns->availability_array[n] == 2) {
+            MSK_putvarbound(task, n, MSK_BK_FX, 0.0, 0.0);
+            MSK_putcj(task, n, 0.0);
+        } else {
+            MSK_putvarbound(task, n, MSK_BK_RA, 0.0, 1.0);
+            MSK_putcj(task, n, (double)zns->wear_array[n]);
+        }
+
+        /*
+          Prepare indeces and coefficients forthe constraint: Chunks should sum up to total zone size
+        */
+        indices[n] = n;
+        coeffs[n] = 1.0;
+    }
+
+    MSK_appendcons(task, 1);
+    MSK_putarow(task, 0, spp->block_chunks, indices, coeffs);
+    MSK_putconbound(task, 0, MSK_BK_FX, (double)spp->zone_block_chunks, (double)spp->zone_block_chunks);
+
+    // Define s_l variables (lun selection)
+    for (int l = 0; l < spp->total_planes; l++) {
+        int s_idx = spp->block_chunks + l; // each lun selection index is added to the block selection indeces
+        MSK_putvartype(task, s_idx, MSK_VAR_TYPE_INT);
+        MSK_putvarbound(task, s_idx, MSK_BK_RA, 0.0, 1.0);
+        MSK_putcj(task, s_idx, 0.0);
+    }
+
+    int constraint_idx = 1;
+
+    for (int l = 0; l < spp->total_planes; l++) {
+        int l_idx = spp->block_chunks + l;
+        /*Constraint : M * s_l >= sum(c_n * g_l[n]) -> sum(c_n * g_l[n]) - M * s_l <= 0
+        Ensure 𝑠𝑙 = 1 if at least one chunk from group 𝑙 is selected. Here, 𝑀 is a large constant (e.g., the maximum chunks per LUN)
+        */
+        for (int n = 0; n < spp->block_chunks; n++) {
+            // sum(c_n * g_l[n])
+            indices[n] = n;
+            coeffs[n] = (double)chunk_assignment[l * spp->block_chunks + n];
+        }
+        indices[spp->block_chunks] = l_idx;
+        coeffs[spp->block_chunks] = -(double)spp->chunks_per_lun;
+        MSK_appendcons(task, 1);
+        MSK_putarow(task, constraint_idx, spp->block_chunks + 1, indices, coeffs);
+        MSK_putconbound(task, constraint_idx++, MSK_BK_UP, -MSK_INFINITY, 0.0);
+
+        /*
+        Constraint: sum(c_n * g_l[n]) - s_l >= 0
+        enforces 𝑠𝑙 = 0 when the group contributes no chunks.
+        */
+        coeffs[spp->block_chunks] = -1.0;  // -s_l
+        MSK_appendcons(task, 1);
+        MSK_putarow(task, constraint_idx, spp->block_chunks + 1, indices, coeffs);
+        MSK_putconbound(task, constraint_idx++, MSK_BK_LO, 0.0, spp->chunks_per_lun);
+
+
+       /*
+       Constraint: sum(c_n * g_l[n]) <= G 
+       Ensure no more than G chunks are selected per LUN
+       */
+        MSK_appendcons(task, 1);
+        MSK_putarow(task, constraint_idx, spp->block_chunks, indices, coeffs);
+        MSK_putconbound(task, constraint_idx++, MSK_BK_UP, 0.0, spp->max_chunks_per_lun);
+
+        /*
+            Set up indeces and coefficients for the constraint: sum(s_l) >= K
+            Ensure that at least 𝐾 LUNs contribute chunks to the zone, by requiring the sum of selected groups in array 𝑠 to be at least 𝐾
+        */
+        indices1[l] = spp->block_chunks + l;
+        coeffs1[l] = 1.0;
+    }
+    MSK_appendcons(task, 1);
+    MSK_putarow(task, constraint_idx, spp->total_planes, indices1, coeffs1);
+    MSK_putconbound(task, constraint_idx++, MSK_BK_LO, (double)spp->min_luns, spp->total_planes);
+
+    // === Solve ===
+    double* solution = g_malloc0(sizeof(double) * nvars);
+    MSK_optimizetrm(task, NULL);
+    MSK_getxx(task, MSK_SOL_ITG, solution);
+
+    // Allocate and initialize selected_indices to -1
+    ventry->selected_indices = g_malloc0(sizeof(uint64_t) * spp->max_chunks_per_lun * spp->total_planes);
+    for (int i = 0; i < spp->max_chunks_per_lun * spp->total_planes; i++) {
+        ventry->selected_indices[i] = -1;
+    }
+
+    // Track insertion position per group (e.g., per plane)
+    int *pos_in_group = g_malloc0(sizeof(int) * spp->total_planes);
+
+    int count_selected = 0;
+    for (int i = 0; i < spp->block_chunks; i++) {
+        if (solution[i] == 1) {
+            // Update availability array
+            if (zns->availability_array[i] == 3)
+                zns->availability_array[i] = 2;
+            else
+                zns->availability_array[i] = 1;
+
+            // Compute group and offset
+            int g = i / spp->chunks_per_lun;       // plane index
+            int offset = i % spp->chunks_per_lun;  // chunk offset within plane
+
+            // Write offset to selected_indices in that group
+            int index = g * spp->max_chunks_per_lun + pos_in_group[g];
+            ventry->selected_indices[index] = offset;
+            pos_in_group[g]++;
+
+            count_selected++;
+        }
+    }
+
+    g_free(pos_in_group);  // clean up if not reused
+
+
+    printf("[DEBUG] Total selected chunks by solver: %d\n", count_selected);
+
+
+    // === Cleanup ===
+    g_free(indices);
+    g_free(coeffs);
+    g_free(solution);
+    g_free(chunk_assignment);
+    g_free(indices1);
+    g_free(coeffs1);
+
+
+    printf("\n Availability array after mapping:\n");
+    for (int idx = 0; idx < spp->block_chunks; idx++) {
+        if (idx % spp->chunks_per_lun == 0)
+            printf("\n");
+
+        printf("%2d ", zns->availability_array[idx]);
+    }
+    printf("\n");
+
+    for (int idx = 0; idx < spp->max_chunks_per_lun * spp->total_planes; idx++) {
+        if (idx % spp->max_chunks_per_lun == 0)
+            printf("\n");
+
+        printf("%2ld ", ventry->selected_indices[idx]);
+    }
+    printf("\n");
+
+    MSK_deletetask(&task);
+    MSK_deleteenv(&env);
+
+    return 0;
+}
+
+
+int zns_full_block_striping(ZNS *zns, zns_vtable_entry *ventry) {
+    
+    ZNSParams *spp = &zns->sp;
+
+    printf("\n Availability array before mapping:\n");
+    femu_log("spp params chunks per lun: %d\n", spp->chunks_per_lun);
+    for (int idx = 0; idx < spp->block_chunks; idx++) {
+        if (idx % spp->chunks_per_lun == 0)
+            printf("\n");
+
+        printf("%2d ", zns->availability_array[idx]);
+    }
+    printf("\n");
+
+    MSKenv_t env = NULL;
+    MSKtask_t task = NULL;
+    MSKrescodee r = MSK_RES_OK; // return code
+
+    r = MSK_makeenv(&env, NULL);
+    if (r != MSK_RES_OK) return r;
+
+    int nvars = spp->block_chunks; // total number of variables in the task
+    int ncons = 1 + spp->total_planes; // total number of constraints: sum + constriant per plane
+
+    r = MSK_maketask(env, ncons, nvars, &task); // creaate a new task with estimated number of vars and cons
+    if (r != MSK_RES_OK) return r;
+
+    MSK_putobjsense(task, MSK_OBJECTIVE_SENSE_MINIMIZE);
+    MSK_appendvars(task, nvars);
+
+    uint8_t* chunk_assignment = g_malloc0(sizeof(uint8_t) * spp->total_planes * spp->block_chunks);
+    int* indices = g_malloc0(sizeof(int) * spp->block_chunks);
+    double* coeffs = g_malloc0(sizeof(double) * spp->block_chunks);
+
+    for (int n = 0; n < spp->block_chunks; n++) {
+        // Set up chunk membership in the plane e.g 111100000
+        int l = n / spp->chunks_per_lun;
+        int idx = l * spp->block_chunks + n;
+        chunk_assignment[idx] = 1;
+
+        // Define c_n variables and their bounds based on availability (chunk selection)
+        MSK_putvartype(task, n, MSK_VAR_TYPE_INT);
+        if (zns->availability_array[n] == 1 || zns->availability_array[n] == 2) {
+            MSK_putvarbound(task, n, MSK_BK_FX, 0.0, 0.0);
+            MSK_putcj(task, n, 0.0);
+        } else {
+            MSK_putvarbound(task, n, MSK_BK_RA, 0.0, 1.0);
+            MSK_putcj(task, n, (double)zns->wear_array[n]);
+        }
+
+        /*
+        Chunks should sum up to total zone size
+        */
+        indices[n] = n;
+        coeffs[n] = 1.0;
+
+    }
+    MSK_appendcons(task, 1);
+    MSK_putarow(task, 0, spp->block_chunks, indices, coeffs);
+    MSK_putconbound(task, 0, MSK_BK_FX, (double)spp->zone_block_chunks, (double)spp->zone_block_chunks);
+
+    int constraint_idx = 1;
+    for (int l = 0; l < spp->total_planes; l++) {
+        /*
+        Constraint: sum(c_n * g_l[n]) <= G
+        */
+        for (int n = 0; n < spp->block_chunks; n++) {
+            // sum(c_n * g_l[n])
+            indices[n] = n;
+            coeffs[n] = (double)chunk_assignment[l * spp->block_chunks + n];
+        }
+        MSK_appendcons(task, 1);
+        MSK_putarow(task, constraint_idx, spp->block_chunks, indices, coeffs);
+        MSK_putconbound(task, constraint_idx, MSK_BK_FX, spp->max_chunks_per_lun, spp->max_chunks_per_lun);
+        constraint_idx++;
+    }
+
+    // Solve
+    double* solution = g_malloc0(sizeof(double) * nvars);
+    MSK_optimizetrm(task, NULL);
+    MSK_getxx(task, MSK_SOL_ITG, solution);
+
+    int *pos_in_group = g_malloc0(sizeof(int) * spp->total_planes);
+    ventry->selected_indices = g_malloc0(sizeof(uint64_t) * spp->max_chunks_per_lun * spp->total_planes);
+    int count_selected = 0;
+
+    for (int i = 0; i < spp->block_chunks; i++) {
+        if (solution[i] == 1) {
+            // Update availability array
+            if (zns->availability_array[i] == 3)
+                zns->availability_array[i] = 2;
+            else
+                zns->availability_array[i] = 1;
+
+            int g = i / spp->chunks_per_lun;
+            int offset = i % spp->chunks_per_lun;
+
+            ventry->selected_indices[g * spp->max_chunks_per_lun + pos_in_group[g]] = offset;
+            pos_in_group[g]++;
+
+            count_selected++;
+        }
+    }
+    g_free(pos_in_group);
+    printf("[DEBUG] Total selected chunks by solver: %d\n", count_selected);
+
+    // === Cleanup ===
+    g_free(indices);
+    g_free(coeffs);
+    g_free(solution);
+    g_free(chunk_assignment);
+
+    printf("\n Availability array after mapping:\n");
+    for (int idx = 0; idx < spp->block_chunks; idx++) {
+        if (idx % spp->chunks_per_lun == 0)
+            printf("\n");
+
+        printf("%2d ", zns->availability_array[idx]);
+    }
+    printf("\n");
+
+    for (int idx = 0; idx < spp->max_chunks_per_lun * spp->total_planes; idx++) {
+        if (idx % spp->max_chunks_per_lun == 0)
+            printf("\n");
+
+        printf("%2ld ", ventry->selected_indices[idx]);
+    }
+    printf("\n");
+
+    MSK_deletetask(&task);
+    MSK_deleteenv(&env);
+
+    return 0;
+}
+
+int zns_init_stripe_solver(ZNS *zns) {
+
+    ZNSParams *spp = &zns->sp;
+    int nvars = spp->stripe_chunks; // total number of variables in the task
+
+    if (MSK_makeenv(&zns->solver_env, NULL) != MSK_RES_OK)
+        return -1;
+
+    if (MSK_maketask(zns->solver_env, 1, nvars, &zns->solver_task) != MSK_RES_OK)
+        return -1;
+
+    MSK_appendvars(zns->solver_task, nvars);
+    MSK_putobjsense(zns->solver_task, MSK_OBJECTIVE_SENSE_MINIMIZE);
+
+    // Define variable type
+    for (int n = 0; n < nvars; n++) {
+        MSK_putvartype(zns->solver_task, n, MSK_VAR_TYPE_INT);
+    }
+
+    // constraint: sum c_n = spp->zone_stripe_chunks
+    MSK_appendcons(zns->solver_task, 1);
+
+    int *indices = g_malloc0(sizeof(int) * nvars);
+    double *coeffs = g_malloc0(sizeof(double) * nvars);
+    for (int i = 0; i < nvars; ++i) {
+        indices[i] = i;
+        coeffs[i] = 1.0;
+    }
+    MSK_putarow(zns->solver_task, 0, nvars, indices, coeffs); // Change one row of the linear constraint matrix
+
+    g_free(indices);
+    g_free(coeffs);
+
+    zns->solver_initialized = 1;
+    return 0;
+}
+
+
+int zns_stripe_allocation(ZNS *zns, zns_vtable_entry *ventry) {
+    if (!zns->solver_initialized) {
+        femu_log("Initialize solver\n");
+        if (zns_init_stripe_solver(zns) != 0)
+            return -1;
+    }
+
+    ZNSParams *spp = &zns->sp;
+    int nvars = spp->stripe_chunks;
+    MSKtask_t task = zns->solver_task;
+
+    for (int i = 0; i < nvars; ++i) {
+        if (zns->availability_array[i] == 1 || zns->availability_array[i] == 2) {
+            // set unavailable chunks bound as 0
+            MSK_putvarbound(task, i, MSK_BK_FX, 0.0, 0.0);
+            MSK_putcj(task, i, 0.0);
+        } else {
+            // set available chunks bound between 0 and 1
+            MSK_putvarbound(task, i, MSK_BK_RA, 0.0, 1.0);
+            MSK_putcj(task, i, (double)zns->wear_array[i]);
+        }
+    }
+
+    // set lower and upper bound of the constraint
+    MSK_putconbound(task, 0, MSK_BK_FX, (double)spp->zone_stripe_chunks, (double)spp->zone_stripe_chunks);
+
+    double *solution = g_malloc0(sizeof(double) * nvars);
+    MSK_optimizetrm(task, NULL);
+    MSK_getxx(task, MSK_SOL_ITG, solution);
+
+    int count_selected = 0;
+    for (int i = 0; i < nvars; i++) {
+        if (solution[i] == 1) {
+            count_selected++;
+            // Update availability array
+            if (zns->availability_array[i] == 3)
+                zns->availability_array[i] = 2;
+            else
+                zns->availability_array[i] = 1;
+        }
+    }
+
+    printf(" Total selected chunks by solver: %d\n", count_selected);
+    printf("\n Availability array after mapping:\n");
+    for (int idx = 0; idx < nvars; idx++) {
+        printf("%2d ", zns->availability_array[idx]);
+    }
+    printf("\n");
+
+    g_free(solution);
+    return 0;
+}
+
 
 static inline void zns_assign_physical_zone(FemuCtrl *n, zns_vtable_entry* ventry) {
     struct zns *zns = n->zns; 
@@ -188,8 +605,17 @@ static inline void zns_assign_physical_zone(FemuCtrl *n, zns_vtable_entry* ventr
             femu_err("Fatal error assigning physical to virtual zone\n");
             assert(false);
         }
+        
     }
+
     assert(ventry->physical_zone && ventry->status != NVME_VZONE_UNASSIGNED);
+    // else {
+    //     int ret = solve_problem(zns, ventry);
+    //     if (ret != 0) {
+    //         femu_err("Failed to solve chunk allocation problem\n");
+    //     }
+    // }
+    
 }
 
 static int zns_init_zone_geometry(NvmeNamespace *ns, Error **errp)
@@ -415,7 +841,8 @@ void zns_ns_shutdown(NvmeNamespace *ns)
 void zns_ns_cleanup(NvmeNamespace *ns)
 {
     FemuCtrl *n = ns->ctrl;
-
+    femu_log("free zns resources\n");
+    struct zns *zns = n->zns;
     if (n->zoned) {
         g_free(n->id_ns_zoned);
         g_free(n->zone_array);
@@ -423,6 +850,8 @@ void zns_ns_cleanup(NvmeNamespace *ns)
 
         g_free(n->zvtable->entries);
         g_free(n->zvtable);
+        g_free(zns->availability_array);
+        g_free(zns->wear_array);
     }
 }
 
@@ -2029,7 +2458,7 @@ static void zns_init_vtable(FemuCtrl * n, ZNSParams *spp) {
         }
     }
     // Lazy
-    else {
+    else if (spp->vtable_mode == 1) {
         for (i = 0; i < n->num_zones; i++, zone++, ventry++) {
             // All physical zone start out as INACTIVE
             QTAILQ_INSERT_HEAD(&n->zvtable->free_zones, zone, entry);
@@ -2043,9 +2472,26 @@ static void zns_init_vtable(FemuCtrl * n, ZNSParams *spp) {
             start += zone_size;
         }
     }
+
+    else {
+        for (i = 0; i < n->num_zones; i++, zone++, ventry++) {
+            zns_set_physical_zone(&n->namespaces[0], ventry, NULL);
+            ventry->status = NVME_VZONE_UNASSIGNED;
+            // temporary testing
+            if (spp->vtable_mode == 2){
+                zns_full_block_striping(n->zns, ventry);
+            }else if (spp->vtable_mode == 3)
+                zns_flexible_block_striping(n->zns, ventry); 
+            else{
+                zns_stripe_allocation(n->zns, ventry);
+            }
+            start += zone_size;
+        }
+    }
 }
 
 static void znsssd_init_params(FemuCtrl * n, ZNSParams *spp){
+    struct zns *zns = n->zns;
     ZNSParams *spp_param = &(n->zns_params); 
     NvmeNamespace *ns = &n->namespaces[0];
     uint32_t lbasz = 1 << zns_ns_lbads(ns);
@@ -2070,6 +2516,7 @@ static void znsssd_init_params(FemuCtrl * n, ZNSParams *spp){
     spp->dies_per_chip  = spp_param->dies_per_chip;    //default : 1
     spp->planes_per_die = spp_param->planes_per_die;    //default : 4
     spp->block_size     = spp_param->block_size;
+    
     uint64_t bytes_per_block = spp->block_size * ZNS_INTERNAL_PAGE_SIZE;
     uint64_t zns_stripe_size_bs = bytes_per_block * spp->ways_per_zone * spp->chnls_per_zone;
     femu_err("Stripe size %lu %lu %lu\n", n->zone_cap_bs, zns_stripe_size_bs, n->zone_cap_bs % zns_stripe_size_bs);
@@ -2082,9 +2529,48 @@ static void znsssd_init_params(FemuCtrl * n, ZNSParams *spp){
     /* TO REAL STORAGE SIZE */
     spp->csze_pages     = (((int64_t)n->memsz) * 1024 * 1024) / ZNS_EXTERNAL_PAGE_SIZE 
         / spp->nchnls / spp->ways;
-    spp->nchips         = (((int64_t)n->memsz) * 1024 * 1024) 
+    spp->total_chips         = (((int64_t)n->memsz) * 1024 * 1024) 
         / ZNS_EXTERNAL_PAGE_SIZE / spp->csze_pages;
         
+    spp->chunk_size = 1; /* stripe or block chunk size depending on the vtable mode*/
+    spp->zone_block_chunks = 64; // has to be power of 2
+    spp->total_planes = spp->ways * spp->planes_per_die* spp->dies_per_chip * spp->nchnls;
+    spp->total_blocks = (((int64_t)n->memsz) * 1024 * 1024) / (spp->block_size * ZNS_INTERNAL_PAGE_SIZE);
+    spp->total_stripes = (((int64_t)n->memsz) * 1024 * 1024) / (spp->total_planes * spp->block_size * ZNS_INTERNAL_PAGE_SIZE);   
+
+    if (spp->vtable_mode == 2){
+        /*
+          spp->vtable_mode == 2: fully striped chunk allocation
+        */
+        spp->block_chunks = spp->total_blocks / spp->chunk_size;
+        // enforce full striping where each LUN contributes equal num chunks
+        spp->max_chunks_per_lun = spp->zone_block_chunks / spp->total_planes;
+        spp->min_luns = spp->total_planes;
+        zns->availability_array = g_malloc0(sizeof(uint8_t) * spp->block_chunks);
+        zns->wear_array = g_malloc0(sizeof(uint8_t) * spp->block_chunks);
+    }else if (spp->vtable_mode == 3){
+        /*
+          spp->vtable_mode == 3: flexible chunk allocation
+        */
+        spp->block_chunks = spp->total_blocks / spp->chunk_size;
+        spp->max_chunks_per_lun = 3; // manually configured by the user
+        spp->min_luns = 16; // manually configured by the user
+        zns->availability_array = g_malloc0(sizeof(uint8_t) * spp->block_chunks);
+        zns->wear_array = g_malloc0(sizeof(uint8_t) * spp->block_chunks);
+    } else if (spp->vtable_mode == 4){
+        /*
+          Stripe allocation
+        */
+        spp->stripe_chunks = spp->total_stripes / spp->chunk_size;
+        spp->zone_stripe_chunks = spp->stripe_chunks / spp->zones;
+        zns->availability_array = g_malloc0(sizeof(uint8_t) * spp->stripe_chunks);
+        zns->wear_array = g_malloc0(sizeof(uint8_t) * spp->stripe_chunks);
+    }
+    spp->chunks_per_lun = spp->block_chunks / spp->total_planes; // given that in this implementation we treat plane as LUN
+
+    femu_log("vtable mode: %d\n", spp->vtable_mode);
+    femu_log("Number of chunks: %d\n", spp->block_chunks);
+
     femu_log("===========================================\n");
     femu_log("|        ConfZNS HW Configuration()       |\n");      
     femu_log("===========================================\n");
@@ -2141,15 +2627,15 @@ void znsssd_init(FemuCtrl * n){
     ZNSParams *spp = &zns->sp; 
     zns->namespaces = n->namespaces;
     znsssd_init_params(n, spp);
-    uint64_t nplanes = (spp->ways * spp->planes_per_die* spp->dies_per_chip * spp->nchnls);
     
     femu_err("zns.c:1820 znssd_init(): nplanes %ld spp->ways %ld spp->planes_per_die %ld\
              spp->dies_per_chip %ld \
-             spp->nchnls %ld \n ", nplanes, spp->ways, spp->planes_per_die, spp->dies_per_chip, spp->nchnls);
+             spp->nchnls %ld \n ", spp->total_planes, spp->ways, spp->planes_per_die, spp->dies_per_chip, spp->nchnls);
     /* initialize zns ssd internal layout architecture */
     zns->ch     = g_malloc0(sizeof(struct zns_ssd_channel) * spp->nchnls);
     zns->chips  = g_malloc0(sizeof(struct zns_ssd_lun) * spp->nchnls*spp->ways);
-    zns->planes = g_malloc0(sizeof(struct zns_ssd_plane) * nplanes);
+    zns->planes = g_malloc0(sizeof(struct zns_ssd_plane) * spp->total_planes);
+
     zns->zone_array = n->zone_array;
     zns->num_zones = spp->zones;
     for(uint32_t i=0 ; i < n->num_zones; i++){
@@ -2165,9 +2651,10 @@ void znsssd_init(FemuCtrl * n){
     for (int i = 0; i < spp->nchnls * spp->ways; i++) {
         zns_init_chip(&zns->chips[i], spp);
     }
-    for (uint64_t i = 0; i < nplanes; i++){
+    for (uint64_t i = 0; i < spp->total_planes; i++){
         zns_init_plane(&zns->planes[i], spp);
     }
+
 }
 
 static void zns_exit(FemuCtrl *n)

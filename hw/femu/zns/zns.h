@@ -1,6 +1,7 @@
 #ifndef __FEMU_ZNS_H
 #define __FEMU_ZNS_H
 #include "../nvme.h"
+#include "mosek.h"
 
 #define _64KB   (64 * KiB)
 #define _16KB   (16 * KiB)
@@ -76,8 +77,23 @@ typedef struct zns {
     struct zns_vtable_entry *ventry;
     uint32_t num_zones;
     /* lockless ring for communication with NVMe IO thread */
-
     QemuThread zns_thread;
+    
+    /*
+    availability of zone unit (block, chunk, stripe, strip chunk):
+          0 - free available
+          1 - free assigned
+          2 - occupied assigned
+          3 - occupied available
+    */
+    /*
+      NOTE: paramters like number of chunks and etc are in nvme.h typedef struct ZNSParams 
+    */
+    uint8_t *availability_array;
+    uint64_t *wear_array; // wear of zone unit
+    MSKenv_t solver_env;
+    MSKtask_t solver_task;
+    int solver_initialized;
 } ZNS;
 
 typedef struct QEMU_PACKED NvmeZonedResult {
@@ -210,6 +226,8 @@ typedef struct zns_vtable_entry {
     NvmeZone logical_zone;
     NvmeZone *physical_zone;
     uint8_t status;
+    uint64_t *selected_indices;
+    uint64_t *group_counts;
 } zns_vtable_entry;
 
 typedef struct zns_vtable {
