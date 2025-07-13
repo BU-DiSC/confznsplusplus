@@ -200,6 +200,7 @@ typedef struct NvmeZone {
     uint64_t        cnt_reset;
     pthread_spinlock_t w_ptr_lock;
     uint64_t finish_lba;
+    uint64_t finsh_blocks;
     QTAILQ_ENTRY(NvmeZone) entry;
 } NvmeZone;
 
@@ -357,6 +358,8 @@ static inline void zns_aor_dec_active(NvmeNamespace *ns)
 
 static inline uint64_t zns_get_flex_plane_idx(uint64_t unit_idx, ZNSParams* spp);
 uint64_t zns_advance_status_finish_flex(ZNS *zns, NvmeRequest *req);
+uint64_t zns_advance_status_finish_flex_block(ZNS *zns, NvmeRequest *req);
+uint64_t zns_advance_status_finish_flex_block_chunk(ZNS *zns, NvmeRequest *req);
 
 
 void zns_ns_shutdown(NvmeNamespace *ns);
