@@ -760,6 +760,12 @@ static Property femu_props[] = {
     DEFINE_PROP_UINT8("zns_asynchronous_resets", FemuCtrl, zns_params.asynchronous_resets, 1),
     // ZNS VTable mode (0 == direct, 1 == lazy)
     DEFINE_PROP_UINT8("zns_vtable_mode", FemuCtrl, zns_params.vtable_mode, 0),
+    DEFINE_PROP_UINT64("zns_chunk_size", FemuCtrl, zns_params.chunk_size, 1),
+    DEFINE_PROP_UINT64("zns_max_chunks_per_lun", FemuCtrl, zns_params.max_chunks_per_lun, 3),
+    DEFINE_PROP_UINT64("zns_min_luns", FemuCtrl, zns_params.min_luns, 16),
+    DEFINE_PROP_UINT8("zns_debug", FemuCtrl, zns_params.debug, 1),
+    DEFINE_PROP_STRING("zns_log_path", FemuCtrl, zns_params.log_path),
+    DEFINE_PROP_STRING("zns_log_path_time", FemuCtrl, zns_params.log_path_time),
     // End
     DEFINE_PROP_END_OF_LIST(),
 };

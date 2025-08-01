@@ -2,6 +2,7 @@
 #define __FEMU_ZNS_H
 #include "../nvme.h"
 #include "mosek.h"
+#include <time.h>
 
 #define _64KB   (64 * KiB)
 #define _16KB   (16 * KiB)
@@ -200,7 +201,7 @@ typedef struct NvmeZone {
     uint64_t        cnt_reset;
     pthread_spinlock_t w_ptr_lock;
     uint64_t finish_lba;
-    uint64_t finsh_blocks;
+    uint64_t finish_blocks;
     QTAILQ_ENTRY(NvmeZone) entry;
 } NvmeZone;
 
@@ -356,11 +357,66 @@ static inline void zns_aor_dec_active(NvmeNamespace *ns)
     assert(n->nr_active_zones >= 0);
 }
 
-static inline uint64_t zns_get_flex_plane_idx(uint64_t unit_idx, ZNSParams* spp);
-uint64_t zns_advance_status_finish_flex(ZNS *zns, NvmeRequest *req);
-uint64_t zns_advance_status_finish_flex_block(ZNS *zns, NvmeRequest *req);
-uint64_t zns_advance_status_finish_flex_block_chunk(ZNS *zns, NvmeRequest *req);
+/*
+  input: zone logical page offset, selected units (blocks or block chunks) for the zone, spp
+  ouput: which unit does the page maps
+*/
+static inline uint64_t zns_flex_get_unit_idx(uint64_t zlpo, uint64_t* selected_indices, ZNSParams* spp);
 
+/*
+  input: zone logical page offset, selected stripe units for the zone, spp
+  ouput: which stripe does the page maps
+*/
+static inline uint64_t zns_flex_stripe_get_unit_idx(uint64_t zlpo, uint64_t* selected_indices, ZNSParams* spp);
+
+/*
+  input: zone logical page offset, stripe, spp
+  ouput: which block in the stripe the page maps
+*/
+static inline uint64_t zns_flex_stripe_get_block_idx(uint64_t zlpo, uint64_t stripe, ZNSParams* spp);
+
+/*
+  input: zone logical page offset, chunk index, spp
+  ouput: which block in the chunk the page maps (returns the block index not the offset within the chunk)
+*/
+static inline uint64_t zns_flex_chunk_get_block_idx(uint64_t zlpo, uint64_t unit_idx, const ZNSParams* spp);
+
+/*
+  map block inex to the plane index
+*/
+static inline uint64_t zns_flex_get_plane_idx(uint64_t block, ZNSParams* spp);
+
+/*
+  map plane index to the channel index
+*/
+static inline uint64_t zns_flex_get_chnl_idx(uint64_t plane, ZNSParams* spp);
+
+/*
+  Iterate through the number of blocks per chunk_size and erase that block index from each chunk
+  For instance with first iteration we first erase the 0-offset blocks in each chunk then 1-offset and so on.
+  Reset the availability value once both chunks in the unit are erased
+*/
+static uint64_t zns_flex_chunk_advance_status_reset_physical(NvmeRequest *req, ZNS *zns);
+
+/*
+  Iterate through all the stripes allocated for the zone and if the stripe needs to be erased then iterate through the blocks in that stripe and erase them
+*/
+static uint64_t zns_flex_stripe_advance_status_reset_physical(NvmeRequest *req, ZNS *zns);
+
+/*
+  Iterate through the selected_indices blocks and check each and every one of them if they need to be reset.
+  The blocks in the selected indices are already organized in stripe major order so by simply iterating through them we ensure the reset parallelism.
+  This works for both flexibl and full allocation schemes
+*/
+static uint64_t zns_flex_block_advance_status_reset_physical(NvmeRequest *req, ZNS *zns);
+
+static uint64_t zns_flex_stripe_advance_status_finish(ZNS *zns, NvmeRequest *req);
+
+static uint64_t zns_flex_chunk_advance_status_finish(ZNS *zns, NvmeRequest *req);
+
+static uint64_t zns_flex_block_advance_status_finish(ZNS *zns, NvmeRequest *req);
+
+static void print_availability(ZNS *zns);
 
 void zns_ns_shutdown(NvmeNamespace *ns);
 void zns_ns_cleanup(NvmeNamespace *ns);

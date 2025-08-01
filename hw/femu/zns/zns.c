@@ -10,6 +10,12 @@
 #define ZNS_ZONE_SIZE_PAGES (ZNS_ZONE_SIZE_BYTES / ZNS_INTERNAL_PAGE_SIZE)
 #define FINISH_BLOCK_SIZE ((ZNS_INTERNAL_PAGE_SIZE / 512ULL) * 16ULL)
 
+/*
+    femu exposes 512 as the lba size to the host while the physical page is 16Kib.
+    However each lba I/O to the physical page has the same cost as the whole page write. For now do 16Kib writes from the host side
+*/
+
+#define LBA_PER_PAGE 32
 
 uint64_t lag = 0;
 uint64_t finishing = 0;
@@ -153,33 +159,216 @@ static inline void zns_set_physical_zone(NvmeNamespace *ns, zns_vtable_entry *ve
     }
 }
 
-int zns_flexible_block_striping(ZNS *zns, zns_vtable_entry *ventry) {
+// int zns_flexible_block_striping(ZNS *zns, zns_vtable_entry *ventry) {
     
+//     ZNSParams *spp = &zns->sp;
+
+//     if(spp->debug){
+//         printf("\n Availability array before mapping:\n");
+//         for (int stripe = 0; stripe < spp->chunks_per_lun; stripe++) {
+//             for (int plane = 0; plane < spp->total_planes; plane++) {
+//                 int idx = stripe * spp->total_planes + plane;
+//                 printf("%2d ", zns->availability_array[idx]);
+//             }
+//             printf("\n");
+//         }
+//     }
+
+//     uint8_t* chunk_assignment = g_malloc0(sizeof(uint8_t) * spp->total_planes * spp->block_chunks);
+//     int* indices = g_malloc0(sizeof(int) * (spp->block_chunks + 1));
+//     double* coeffs = g_malloc0(sizeof(double) * (spp->block_chunks + 1));
+//     int* indices1 = g_malloc0(sizeof(int) * spp->total_planes);
+//     double* coeffs1 = g_malloc0(sizeof(double) * spp->total_planes);
+//     int nvars = spp->block_chunks + spp->total_planes;
+//     int ncons = 1 + spp->total_planes * 3 + 1; // total number of constraints
+
+//     MSKenv_t env = NULL;
+//     MSKtask_t task = NULL;
+//     MSKrescodee r = MSK_RES_OK;
+
+//     r = MSK_makeenv(&env, NULL);
+//     if (r != MSK_RES_OK) return r;
+
+//     r = MSK_maketask(env, ncons, nvars, &task);
+//     if (r != MSK_RES_OK) return r;
+
+//     MSK_putobjsense(task, MSK_OBJECTIVE_SENSE_MINIMIZE);
+//     MSK_appendvars(task, nvars);
+
+//     // Define c_n variables (chunk selection)
+//     for (int n = 0; n < spp->block_chunks; n++) {
+//         // Stripe-major layout: convert flat n to (plane, stripe)
+//         int plane  = n % spp->total_planes;
+//         int stripe = n / spp->total_planes;
+//         int idx    = stripe * spp->total_planes + plane;
+
+//         // Mark this chunk as part of the current plane
+//         chunk_assignment[plane * spp->block_chunks + n] = 1;
+
+//         MSK_putvartype(task, n, MSK_VAR_TYPE_INT);
+
+//         if (zns->availability_array[idx] == 1 || zns->availability_array[idx] == 2) {
+//             MSK_putvarbound(task, n, MSK_BK_FX, 0.0, 0.0);
+//             MSK_putcj(task, n, 0.0);
+//         } else {
+//             MSK_putvarbound(task, n, MSK_BK_RA, 0.0, 1.0);
+//             MSK_putcj(task, n, (double)zns->wear_array[idx]);
+//         }
+
+//         /*
+//         Prepare indices and coefficients for the constraint:
+//         Chunks should sum up to total zone size
+//         */
+//         indices[n] = n;
+//         coeffs[n] = 1.0;
+//     }
+
+
+//     MSK_appendcons(task, 1);
+//     MSK_putarow(task, 0, spp->block_chunks, indices, coeffs);
+//     MSK_putconbound(task, 0, MSK_BK_FX, (double)spp->zone_block_chunks, (double)spp->zone_block_chunks);
+
+//     // Define s_l variables (lun selection)
+//     for (int l = 0; l < spp->total_planes; l++) {
+//         int s_idx = spp->block_chunks + l; // each lun selection index is added to the block selection indices
+//         MSK_putvartype(task, s_idx, MSK_VAR_TYPE_INT);
+//         MSK_putvarbound(task, s_idx, MSK_BK_RA, 0.0, 1.0);
+//         MSK_putcj(task, s_idx, 0.0);
+//     }
+
+//     int constraint_idx = 1;
+
+//     for (int l = 0; l < spp->total_planes; l++) {
+//         int l_idx = spp->block_chunks + l;
+//         /*Constraint : M * s_l >= sum(c_n * g_l[n]) -> sum(c_n * g_l[n]) - M * s_l <= 0
+//         Ensure 𝑠𝑙 = 1 if at least one chunk from group 𝑙 is selected. Here, 𝑀 is a large constant (e.g., the maximum chunks per LUN)
+//         */
+//         for (int n = 0; n < spp->block_chunks; n++) {
+//             // sum(c_n * g_l[n])
+//             indices[n] = n;
+//             coeffs[n] = (double)chunk_assignment[l * spp->block_chunks + n];
+//         }
+//         indices[spp->block_chunks] = l_idx;
+//         coeffs[spp->block_chunks] = -(double)spp->chunks_per_lun;
+//         MSK_appendcons(task, 1);
+//         MSK_putarow(task, constraint_idx, spp->block_chunks + 1, indices, coeffs);
+//         MSK_putconbound(task, constraint_idx++, MSK_BK_UP, -MSK_INFINITY, 0.0);
+
+//         /*
+//         Constraint: sum(c_n * g_l[n]) - s_l >= 0
+//         enforces 𝑠𝑙 = 0 when the group contributes no chunks.
+//         */
+//         coeffs[spp->block_chunks] = -1.0;  // -s_l
+//         MSK_appendcons(task, 1);
+//         MSK_putarow(task, constraint_idx, spp->block_chunks + 1, indices, coeffs);
+//         MSK_putconbound(task, constraint_idx++, MSK_BK_LO, 0.0, spp->chunks_per_lun);
+
+
+//        /*
+//        Constraint: sum(c_n * g_l[n]) <= G 
+//        Ensure no more than G chunks are selected per LUN
+//        */
+//         MSK_appendcons(task, 1);
+//         MSK_putarow(task, constraint_idx, spp->block_chunks, indices, coeffs);
+//         MSK_putconbound(task, constraint_idx++, MSK_BK_UP, 0.0, spp->max_chunks_per_lun);
+
+//         /*
+//             Set up indices and coefficients for the constraint: sum(s_l) >= K
+//             Ensure that at least 𝐾 LUNs contribute chunks to the zone, by requiring the sum of selected groups in array 𝑠 to be at least 𝐾
+//         */
+//         indices1[l] = spp->block_chunks + l;
+//         coeffs1[l] = 1.0;
+//     }
+//     MSK_appendcons(task, 1);
+//     MSK_putarow(task, constraint_idx, spp->total_planes, indices1, coeffs1);
+//     MSK_putconbound(task, constraint_idx++, MSK_BK_LO, (double)spp->min_luns, spp->total_planes);
+
+//     // === Solve ===
+//     double* solution = g_malloc0(sizeof(double) * nvars);
+//     MSK_optimizetrm(task, NULL);
+//     MSK_getxx(task, MSK_SOL_ITG, solution);
+
+//     ventry->selected_indices = g_malloc0(sizeof(uint64_t) * spp->zone_block_chunks);  // already done earlier
+
+//     int pos = 0;
+//     printf("solution\n");
+//     for (int i = 0; i < spp->block_chunks; i++) {
+//         if (solution[i] == 1) {
+//             printf("%2lu ", i);
+//             int plane  = i % spp->total_planes;
+//             int stripe = i / spp->total_planes;
+//             int idx    = stripe * spp->total_planes + plane;
+
+//             if (zns->availability_array[idx] == 3)
+//                 zns->availability_array[idx] = 2;
+//             else
+//                 zns->availability_array[idx] = 1;
+
+//             ventry->selected_indices[pos++] = idx;  // sequential write
+//         }
+//     }
+
+
+
+
+//     // printf("[DEBUG] Total selected chunks by solver: %d\n", count_selected);
+
+
+//     // === Cleanup ===
+//     g_free(indices);
+//     g_free(coeffs);
+//     g_free(solution);
+//     g_free(chunk_assignment);
+//     g_free(indices1);
+//     g_free(coeffs1);
+
+//     if(spp->debug){
+//         // printf("\nAvailability array after mapping (columns are planes):\n");
+//         // for (int stripe = 0; stripe < spp->chunks_per_lun; stripe++) {
+//         //     for (int plane = 0; plane < spp->total_planes; plane++) {
+//         //         int idx = stripe * spp->total_planes + plane;
+//         //         printf("%2d ", zns->availability_array[idx]);
+//         //     }
+//         //     printf("\n");
+//         // }
+
+//         printf("\nSelected indices as 1D array:\n");
+//         for (int i = 0; i < spp->zone_block_chunks; i++) {
+//             printf("%2ld ", ventry->selected_indices[i]);
+//         }
+//         printf("\n");
+//     }
+
+
+//     MSK_deletetask(&task);
+//     MSK_deleteenv(&env);
+
+//     return 0;
+// }
+
+
+int zns_flexible_block_striping(ZNS *zns, zns_vtable_entry *ventry) {
     ZNSParams *spp = &zns->sp;
 
-    printf("\n Availability array before mapping:\n");
-    for (int stripe = 0; stripe < spp->chunks_per_lun; stripe++) {
-        for (int plane = 0; plane < spp->total_planes; plane++) {
-            int idx = stripe * spp->total_planes + plane;
-            printf("%2d ", zns->availability_array[idx]);
+    if (spp->debug) {
+        printf("\n Availability array before mapping (stripe-major):\n");
+        for (int stripe = 0; stripe < spp->chunks_per_lun; stripe++) {
+            for (int plane = 0; plane < spp->total_planes; plane++) {
+                int idx = stripe * spp->total_planes + plane;
+                printf("%2d ", zns->availability_array[idx]);
+            }
+            printf("\n");
         }
-        printf("\n");
     }
-
-    uint8_t* chunk_assignment = g_malloc0(sizeof(uint8_t) * spp->total_planes * spp->block_chunks);
-    int* indices = g_malloc0(sizeof(int) * (spp->block_chunks + 1));
-    double* coeffs = g_malloc0(sizeof(double) * (spp->block_chunks + 1));
-    int* indices1 = g_malloc0(sizeof(int) * spp->total_planes);
-    double* coeffs1 = g_malloc0(sizeof(double) * spp->total_planes);
-    int nvars = spp->block_chunks + spp->total_planes;
-    int ncons = 1 + spp->total_planes * 3 + 1; // total number of constraints
 
     MSKenv_t env = NULL;
     MSKtask_t task = NULL;
     MSKrescodee r = MSK_RES_OK;
-
     r = MSK_makeenv(&env, NULL);
     if (r != MSK_RES_OK) return r;
+
+    int nvars = spp->block_chunks + spp->total_planes;
+    int ncons = 1 + spp->total_planes * 3 + 1;
 
     r = MSK_maketask(env, ncons, nvars, &task);
     if (r != MSK_RES_OK) return r;
@@ -187,18 +376,20 @@ int zns_flexible_block_striping(ZNS *zns, zns_vtable_entry *ventry) {
     MSK_putobjsense(task, MSK_OBJECTIVE_SENSE_MINIMIZE);
     MSK_appendvars(task, nvars);
 
-    // Define c_n variables (chunk selection)
-    for (int n = 0; n < spp->block_chunks; n++) {
-        // Stripe-major layout: convert flat n to (plane, stripe)
-        int plane  = n % spp->total_planes;
-        int stripe = n / spp->total_planes;
-        int idx    = stripe * spp->total_planes + plane;
+    uint8_t* chunk_assignment = g_malloc0(sizeof(uint8_t) * spp->total_planes * spp->block_chunks);
+    int* indices = g_malloc0(sizeof(int) * (spp->block_chunks + 1));
+    double* coeffs = g_malloc0(sizeof(double) * (spp->block_chunks + 1));
+    int* indices1 = g_malloc0(sizeof(int) * spp->total_planes);
+    double* coeffs1 = g_malloc0(sizeof(double) * spp->total_planes);
 
-        // Mark this chunk as part of the current plane
+    for (int n = 0; n < spp->block_chunks; n++) {
+        int plane = n % spp->total_planes;
+        int stripe = n / spp->total_planes;
+        int idx = stripe * spp->total_planes + plane;
+
         chunk_assignment[plane * spp->block_chunks + n] = 1;
 
         MSK_putvartype(task, n, MSK_VAR_TYPE_INT);
-
         if (zns->availability_array[idx] == 1 || zns->availability_array[idx] == 2) {
             MSK_putvarbound(task, n, MSK_BK_FX, 0.0, 0.0);
             MSK_putcj(task, n, 0.0);
@@ -206,37 +397,26 @@ int zns_flexible_block_striping(ZNS *zns, zns_vtable_entry *ventry) {
             MSK_putvarbound(task, n, MSK_BK_RA, 0.0, 1.0);
             MSK_putcj(task, n, (double)zns->wear_array[idx]);
         }
-
-        /*
-        Prepare indices and coefficients for the constraint:
-        Chunks should sum up to total zone size
-        */
         indices[n] = n;
         coeffs[n] = 1.0;
     }
 
-
-    MSK_appendcons(task, 1);
-    MSK_putarow(task, 0, spp->block_chunks, indices, coeffs);
-    MSK_putconbound(task, 0, MSK_BK_FX, (double)spp->zone_block_chunks, (double)spp->zone_block_chunks);
-
-    // Define s_l variables (lun selection)
     for (int l = 0; l < spp->total_planes; l++) {
-        int s_idx = spp->block_chunks + l; // each lun selection index is added to the block selection indices
+        int s_idx = spp->block_chunks + l;
         MSK_putvartype(task, s_idx, MSK_VAR_TYPE_INT);
         MSK_putvarbound(task, s_idx, MSK_BK_RA, 0.0, 1.0);
         MSK_putcj(task, s_idx, 0.0);
     }
 
-    int constraint_idx = 1;
+    MSK_appendcons(task, 1);
+    MSK_putarow(task, 0, spp->block_chunks, indices, coeffs);
+    MSK_putconbound(task, 0, MSK_BK_FX, (double)spp->zone_block_chunks, (double)spp->zone_block_chunks);
 
+    int constraint_idx = 1;
     for (int l = 0; l < spp->total_planes; l++) {
         int l_idx = spp->block_chunks + l;
-        /*Constraint : M * s_l >= sum(c_n * g_l[n]) -> sum(c_n * g_l[n]) - M * s_l <= 0
-        Ensure 𝑠𝑙 = 1 if at least one chunk from group 𝑙 is selected. Here, 𝑀 is a large constant (e.g., the maximum chunks per LUN)
-        */
+
         for (int n = 0; n < spp->block_chunks; n++) {
-            // sum(c_n * g_l[n])
             indices[n] = n;
             coeffs[n] = (double)chunk_assignment[l * spp->block_chunks + n];
         }
@@ -246,28 +426,15 @@ int zns_flexible_block_striping(ZNS *zns, zns_vtable_entry *ventry) {
         MSK_putarow(task, constraint_idx, spp->block_chunks + 1, indices, coeffs);
         MSK_putconbound(task, constraint_idx++, MSK_BK_UP, -MSK_INFINITY, 0.0);
 
-        /*
-        Constraint: sum(c_n * g_l[n]) - s_l >= 0
-        enforces 𝑠𝑙 = 0 when the group contributes no chunks.
-        */
-        coeffs[spp->block_chunks] = -1.0;  // -s_l
+        coeffs[spp->block_chunks] = -1.0;
         MSK_appendcons(task, 1);
         MSK_putarow(task, constraint_idx, spp->block_chunks + 1, indices, coeffs);
         MSK_putconbound(task, constraint_idx++, MSK_BK_LO, 0.0, spp->chunks_per_lun);
 
-
-       /*
-       Constraint: sum(c_n * g_l[n]) <= G 
-       Ensure no more than G chunks are selected per LUN
-       */
         MSK_appendcons(task, 1);
         MSK_putarow(task, constraint_idx, spp->block_chunks, indices, coeffs);
         MSK_putconbound(task, constraint_idx++, MSK_BK_UP, 0.0, spp->max_chunks_per_lun);
 
-        /*
-            Set up indices and coefficients for the constraint: sum(s_l) >= K
-            Ensure that at least 𝐾 LUNs contribute chunks to the zone, by requiring the sum of selected groups in array 𝑠 to be at least 𝐾
-        */
         indices1[l] = spp->block_chunks + l;
         coeffs1[l] = 1.0;
     }
@@ -275,37 +442,33 @@ int zns_flexible_block_striping(ZNS *zns, zns_vtable_entry *ventry) {
     MSK_putarow(task, constraint_idx, spp->total_planes, indices1, coeffs1);
     MSK_putconbound(task, constraint_idx++, MSK_BK_LO, (double)spp->min_luns, spp->total_planes);
 
-    // === Solve ===
     double* solution = g_malloc0(sizeof(double) * nvars);
     MSK_optimizetrm(task, NULL);
     MSK_getxx(task, MSK_SOL_ITG, solution);
 
-    // Allocate and initialize selected_indices to -1
+    int* pos_in_group = g_malloc0(sizeof(int) * spp->total_planes);
     ventry->selected_indices = g_malloc0(sizeof(uint64_t) * spp->max_chunks_per_lun * spp->total_planes);
-
-    // Track insertion position per group (e.g., per plane)
     int count_selected = 0;
-    int pos = 0;
+
     for (int i = 0; i < spp->block_chunks; i++) {
         if (solution[i] == 1) {
-            int plane  = i % spp->total_planes;
+            printf("%2d ",i);
+            int plane = i % spp->total_planes;
             int stripe = i / spp->total_planes;
-            int idx    = stripe * spp->total_planes + plane;
+            int idx = stripe * spp->total_planes + plane;
 
             if (zns->availability_array[idx] == 3)
                 zns->availability_array[idx] = 2;
             else
                 zns->availability_array[idx] = 1;
 
-            ventry->selected_indices[pos++] = idx;
+            ventry->selected_indices[pos_in_group[plane] * spp->total_planes + plane] = idx;
+            pos_in_group[plane]++;
             count_selected++;
         }
     }
 
-    printf("[DEBUG] Total selected chunks by solver: %d\n", count_selected);
-
-
-    // === Cleanup ===
+    g_free(pos_in_group);
     g_free(indices);
     g_free(coeffs);
     g_free(solution);
@@ -313,22 +476,13 @@ int zns_flexible_block_striping(ZNS *zns, zns_vtable_entry *ventry) {
     g_free(indices1);
     g_free(coeffs1);
 
-
-    printf("\nAvailability array after mapping (stripe-major):\n");
-    for (int stripe = 0; stripe < spp->chunks_per_lun; stripe++) {
-        for (int plane = 0; plane < spp->total_planes; plane++) {
-            int idx = stripe * spp->total_planes + plane;
-            printf("%2d ", zns->availability_array[idx]);
+    if (spp->debug) {
+        printf("\nSelected indices as 1D array:\n");
+        for (int i = 0; i < spp->zone_block_chunks; i++) {
+            printf("%2ld ", ventry->selected_indices[i]);
         }
         printf("\n");
     }
-
-    printf("\nSelected indices as 1D array:\n");
-    for (int i = 0; i < spp->zone_block_chunks; i++) {
-        printf("%2ld ", ventry->selected_indices[i]);
-    }
-    printf("\n");
-
 
     MSK_deletetask(&task);
     MSK_deleteenv(&env);
@@ -336,17 +490,21 @@ int zns_flexible_block_striping(ZNS *zns, zns_vtable_entry *ventry) {
     return 0;
 }
 
+
+
 int zns_full_block_striping(ZNS *zns, zns_vtable_entry *ventry) {
     ZNSParams *spp = &zns->sp;
 
-    // Print availability array before mapping (stripe-major)
-    printf("\n Availability array before mapping (stripe-major):\n");
-    for (int stripe = 0; stripe < spp->chunks_per_lun; stripe++) {
-        for (int plane = 0; plane < spp->total_planes; plane++) {
-            int idx = stripe * spp->total_planes + plane;
-            printf("%2d ", zns->availability_array[idx]);
+    if(spp->debug){
+        // Print availability array before mapping (stripe-major)
+        printf("\n Availability array before mapping (stripe-major):\n");
+        for (int stripe = 0; stripe < spp->chunks_per_lun; stripe++) {
+            for (int plane = 0; plane < spp->total_planes; plane++) {
+                int idx = stripe * spp->total_planes + plane;
+                printf("%2d ", zns->availability_array[idx]);
+            }
+            printf("\n");
         }
-        printf("\n");
     }
 
     MSKenv_t env = NULL;
@@ -382,8 +540,9 @@ int zns_full_block_striping(ZNS *zns, zns_vtable_entry *ventry) {
             MSK_putcj(task, n, 0.0);
         } else {
             MSK_putvarbound(task, n, MSK_BK_RA, 0.0, 1.0);
-            MSK_putcj(task, n, (double)zns->wear_array[idx]);
+            MSK_putcj(task, n, (double)zns->wear_array[idx]);  // Normal wear-based cost
         }
+
         indices[n] = n;
         coeffs[n] = 1.0;
     }
@@ -432,26 +591,26 @@ int zns_full_block_striping(ZNS *zns, zns_vtable_entry *ventry) {
     }
 
     g_free(pos_in_group);
-    printf("[DEBUG] Total selected chunks by solver: %d\n", count_selected);
+    //printf("[DEBUG] Total selected chunks by solver: %d\n", count_selected);
 
     g_free(indices);
     g_free(coeffs);
     g_free(solution);
     g_free(chunk_assignment);
 
-    printf("\n Availability array after mapping (stripe-major):\n");
-    for (int stripe = 0; stripe < spp->chunks_per_lun; stripe++) {
-        for (int plane = 0; plane < spp->total_planes; plane++) {
-            int idx = stripe * spp->total_planes + plane;
-            printf("%2d ", zns->availability_array[idx]);
-        }
-        printf("\n");
-    }
+    if(spp->debug){
+        // printf("\n Availability array after mapping (columns are planes):\n");
+        // for (int stripe = 0; stripe < spp->chunks_per_lun; stripe++) {
+        //     for (int plane = 0; plane < spp->total_planes; plane++) {
+        //         int idx = stripe * spp->total_planes + plane;
+        //         printf("%2d ", zns->availability_array[idx]);
+        //     }
+        //     printf("\n");
+        // }
 
-    printf("\nSelected indices in stripe-major format:\n");
-    for (int stripe = 0; stripe < spp->max_chunks_per_lun; stripe++) {
-        for (int plane = 0; plane < spp->total_planes; plane++) {
-            printf("%2ld ", ventry->selected_indices[stripe * spp->total_planes + plane]);
+        printf("\nSelected indices as 1D array:\n");
+        for (int i = 0; i < spp->zone_block_chunks; i++) {
+            printf("%2ld ", ventry->selected_indices[i]);
         }
         printf("\n");
     }
@@ -511,29 +670,30 @@ int zns_stripe_allocation(ZNS *zns, zns_vtable_entry *ventry) {
     ZNSParams *spp = &zns->sp;
     int nvars = spp->stripe_chunks;
     MSKtask_t task = zns->solver_task;
+    
+    if (spp->debug){
+        printf("\n Availability array before mapping:\n");
+        for (int idx = 0; idx < nvars; idx++) {
+            printf("%2d ", zns->availability_array[idx]);
+        }
+        printf("\n");
 
-    printf("\n Availability array before mapping:\n");
-    for (int idx = 0; idx < nvars; idx++) {
-        printf("%2d ", zns->availability_array[idx]);
+        printf("\n Wear array before mapping:\n");
+        for (int idx = 0; idx < nvars; idx++) {
+            printf("%2d ", zns->wear_array[idx]);
+        }
+        printf("\n");
     }
-    printf("\n");
-
-    printf("\n Wear array before mapping:\n");
-    for (int idx = 0; idx < nvars; idx++) {
-        printf("%2d ", zns->wear_array[idx]);
-    }
-    printf("\n");
 
     for (int i = 0; i < nvars; ++i) {
         if (zns->availability_array[i] == 1 || zns->availability_array[i] == 2) {
-            // set unavailable chunks bound as 0
             MSK_putvarbound(task, i, MSK_BK_FX, 0.0, 0.0);
             MSK_putcj(task, i, 0.0);
         } else {
-            // set available chunks bound between 0 and 1
             MSK_putvarbound(task, i, MSK_BK_RA, 0.0, 1.0);
             MSK_putcj(task, i, (double)zns->wear_array[i]);
         }
+
     }
 
     // set lower and upper bound of the constraint
@@ -557,30 +717,36 @@ int zns_stripe_allocation(ZNS *zns, zns_vtable_entry *ventry) {
             ventry->selected_indices[count_selected++] = i;
         }
     }
+    if (spp->debug){
+        printf(" Total selected chunks by solver: %d\n", count_selected);
+        printf("\n Availability array after mapping:\n");
+        for (int idx = 0; idx < nvars; idx++) {
+            printf("%2d ", zns->availability_array[idx]);
+        }
+        printf("\n");
 
-    printf(" Total selected chunks by solver: %d\n", count_selected);
-    printf("\n Availability array after mapping:\n");
-    for (int idx = 0; idx < nvars; idx++) {
-        printf("%2d ", zns->availability_array[idx]);
+        printf(" Selected stripe indices:\n");
+        for (int j = 0; j < spp->zone_stripe_chunks; j++) {
+            printf("%2lu ", ventry->selected_indices[j]);
+        }
+        printf("\n");
     }
-    printf("\n");
-
-    printf(" Selected stripe indices:\n");
-    for (int j = 0; j < spp->zone_stripe_chunks; j++) {
-        printf("%2lu ", ventry->selected_indices[j]);
-    }
-    printf("\n");
 
     g_free(solution);
     return 0;
 }
 
 
+
+
 static inline void zns_assign_physical_zone(FemuCtrl *n, zns_vtable_entry* ventry) {
+    femu_err("assigning physical zone\n");
     struct zns *zns = n->zns; 
     ZNSParams *spp = &zns->sp; 
     NvmeZone *physical_zone, *zone, *next;
-
+    struct timespec start, end;
+    long duration_us;
+    clock_gettime(CLOCK_MONOTONIC, &start);
     if (spp->vtable_mode == 1 && ventry->status == NVME_VZONE_UNASSIGNED) {
         // First check in free zones...
         if (!QTAILQ_EMPTY(&n->zvtable->free_zones)) {
@@ -622,6 +788,22 @@ static inline void zns_assign_physical_zone(FemuCtrl *n, zns_vtable_entry* ventr
         zns_stripe_allocation(n->zns, ventry);
         ventry->status = NVME_VZONE_INVALID;
     }
+
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    duration_us = (end.tv_sec - start.tv_sec) * 1000000 + (end.tv_nsec - start.tv_nsec) / 1000;
+    femu_log("[Allocation] mode %d took %ld us\n", spp->vtable_mode, duration_us);
+    // if (spp->log_path_time){
+    //     FILE *fp = fopen(spp->log_path_time, "a");
+    //     if (fp) {
+    //         fprintf(fp, "mode,%lu,chunk,%lu,time,%lu(us)\n",
+    //                 spp->vtable_mode,
+    //                 spp->chunk_size,
+    //                 duration_us);
+    //         fclose(fp);
+    //     } else {
+    //         femu_log("Not writing allocation info\n");
+    //     }
+    // }
 }
 
 static int zns_init_zone_geometry(NvmeNamespace *ns, Error **errp)
@@ -831,7 +1013,6 @@ static void zns_zoned_ns_shutdown(NvmeNamespace *ns)
         zns_aor_dec_active(ns);
         zns_clear_zone(ns, zone);
     }
-
     assert(n->nr_open_zones == 0);
 }
 
@@ -856,8 +1037,6 @@ void zns_ns_cleanup(NvmeNamespace *ns)
 
         g_free(n->zvtable->entries);
         g_free(n->zvtable);
-        g_free(zns->availability_array);
-        g_free(zns->wear_array);
     }
 }
 
@@ -1249,7 +1428,9 @@ static uint16_t zns_close_zone(NvmeNamespace *ns, NvmeZone *zone,
         zns_aor_dec_open(ns);
         zns_assign_zone_state(ns, zone, NVME_ZONE_STATE_CLOSED);
         NvmeZone* physical_zone = zns_get_physical_zone_by_slba(ns, zone->d.zslba);
-        zns_set_zone_state(physical_zone, NVME_ZONE_STATE_CLOSED);    
+        if (physical_zone){
+            zns_set_zone_state(physical_zone, NVME_ZONE_STATE_CLOSED);   
+        }
         /* fall through */
     case NVME_ZONE_STATE_CLOSED:
         return NVME_SUCCESS;
@@ -1311,7 +1492,9 @@ static uint16_t zns_offline_zone(NvmeNamespace *ns, NvmeZone *zone,
     case NVME_ZONE_STATE_READ_ONLY:
         zns_assign_zone_state(ns, zone, NVME_ZONE_STATE_OFFLINE);
         NvmeZone* physical_zone = zns_get_physical_zone_by_slba(ns, zone->d.zslba);
-        zns_set_zone_state(physical_zone, NVME_ZONE_STATE_OFFLINE);      
+        if (physical_zone){
+            zns_set_zone_state(physical_zone, NVME_ZONE_STATE_OFFLINE); 
+        }     
         /* fall through */
     case NVME_ZONE_STATE_OFFLINE:
         return NVME_SUCCESS;
@@ -1494,7 +1677,6 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
             return status;
         }
     }
-
     // zone = &n->zone_array[logical_zone_idx];
     logical_zone = &n->zvtable->entries[logical_zone_idx].logical_zone;
     physical_zone = n->zvtable->entries[logical_zone_idx].physical_zone;
@@ -1504,42 +1686,63 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
 
     switch (action) {
     case NVME_ZONE_ACTION_OPEN:
+
         if (all) {
             proc_mask = NVME_PROC_CLOSED_ZONES;
         }
         status = zns_do_zone_op(ns, logical_zone, proc_mask, zns_open_zone, req);
-        zns_set_zone_state(physical_zone, logical_zone->d.zs);
+        if (physical_zone){
+            zns_set_zone_state(physical_zone, logical_zone->d.zs);
+        }
         break;
     case NVME_ZONE_ACTION_CLOSE:
         if (all) {
             proc_mask = NVME_PROC_OPENED_ZONES;
+            if (spp->log_path) {
+                FILE *fp = fopen(spp->log_path, "a");
+                if (fp) {
+                    fprintf(fp, "\nWear array\n");
+                    uint64_t indices = (spp->vtable_mode == 4) ? spp->stripe_chunks:spp->block_chunks;
+                    for (int idx = 0; idx < indices; idx++) {
+                        fprintf(fp, "%2d ", zns->wear_array[idx]);
+                    }
+                    fprintf(fp, "\nEnd of wear array\n\n");
+                    fclose(fp);
+                } else {
+                    femu_log("Couldn't open wear log file\n");
+                }
+            }
+            g_free(zns->availability_array);
+            g_free(zns->wear_array);
         }
         status = zns_do_zone_op(ns, logical_zone, proc_mask, zns_close_zone, req);
-        zns_set_zone_state(physical_zone, logical_zone->d.zs);
+
+        if (physical_zone){
+            zns_set_zone_state(physical_zone, logical_zone->d.zs);
+        }
         break;
     case NVME_ZONE_ACTION_FINISH:
+
         if (all) {
             proc_mask = NVME_PROC_OPENED_ZONES | NVME_PROC_CLOSED_ZONES;
         }
         if (spp->vtable_mode > 1){
             if (spp->vtable_mode == 4) {
                 // finish in stripe allocation mode
-                req->expire_time += zns_advance_status_finish_flex(zns, req);
-            } else if (spp->chunk_size == 1){
-                // finish in block allocation mode
-                req->expire_time += zns_advance_status_finish_flex_block(zns, req);
-            } else if (spp->chunk_size > 1){
-                req->expire_time += zns_advance_status_finish_flex_block_chunk(zns, req);
+                req->expire_time += zns_flex_stripe_advance_status_finish(zns, req);
+            } else if (spp->vtable_mode == 2 || spp->vtable_mode == 3){
+                // vtable mode 2, 3
+                req->expire_time += zns_flex_chunk_advance_status_finish(zns, req);
             }
             
             if (logical_zone->w_ptr + FINISH_BLOCK_SIZE >= logical_zone->finish_lba || 
                 logical_zone->w_ptr == logical_zone->d.zslba) {
-                femu_err("Done finished\n");
+                //femu_err("Done finished\n");
                 status = zns_do_zone_op(ns, logical_zone, proc_mask, zns_finish_zone, req);
                 cmd->cdw13 =  cpu_to_le32(le32_to_cpu(cmd->cdw13) | 0x100);
-                        femu_err("Done finished?\n");
+                        //femu_err("Done finished?\n");
                 logical_zone->finish_lba = 0; // reset the finish lba
-
+                logical_zone->finish_blocks = 0;
                 ventry = zns_get_vtable_entry_by_slba(ns, slba);
                 uint64_t indices = (spp->vtable_mode == 4) ? spp->zone_stripe_chunks:spp->zone_block_chunks;
                 for (u_int64_t i = 0; i < indices; i++){
@@ -1550,7 +1753,7 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
                 }
             } else {
                 logical_zone->w_ptr += FINISH_BLOCK_SIZE;
-                femu_err("zone->wptr %lu %lu\n", logical_zone->w_ptr, FINISH_BLOCK_SIZE);
+                //femu_err("zone->wptr %lu %lu\n", logical_zone->w_ptr, FINISH_BLOCK_SIZE);
             }
         } else{
             // lazy and direct mapping schemes
@@ -1559,15 +1762,15 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
             //     zone->d.zslba, zns_zone_wr_boundary(zone));
             if (logical_zone->w_ptr + FINISH_BLOCK_SIZE >= zns_zone_wr_boundary(logical_zone) || 
                 logical_zone->w_ptr == logical_zone->d.zslba) {
-                femu_err("Done finished\n");
+                //femu_err("Done finished\n");
                 status = zns_do_zone_op(ns, logical_zone, proc_mask, zns_finish_zone, req);
                 zns_set_zone_state(physical_zone, logical_zone->d.zs);
                 cmd->cdw13 =  cpu_to_le32(le32_to_cpu(cmd->cdw13) | 0x100);
-                        femu_err("Done finished?\n");
+                        //femu_err("Done finished?\n");
             } else {
                 logical_zone->w_ptr += FINISH_BLOCK_SIZE;
                 physical_zone->w_ptr += FINISH_BLOCK_SIZE;
-                femu_err("zone->wptr %lu %lu %lu\n", logical_zone->w_ptr, physical_zone->w_ptr, FINISH_BLOCK_SIZE);
+                //femu_err("zone->wptr %lu %lu %lu\n", logical_zone->w_ptr, physical_zone->w_ptr, FINISH_BLOCK_SIZE);
             }
             // femu_err("zone finish action:%c slba:%ld zone_idx:%d req->expire_time(%lu) - req->stime(%lu):%lu\n",
             //    action, req->slba ,logical_zone_idx,req->expire_time,req->stime,(req->expire_time - req->stime));
@@ -1613,16 +1816,19 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
             status = zns_do_zone_op(ns, logical_zone, proc_mask, zns_reset_zone, req);
             ventry = zns_get_vtable_entry_by_slba(ns, slba);
             ventry->status = NVME_VZONE_UNASSIGNED;
-            uint64_t indices = (spp->vtable_mode == 4) ? spp->zone_stripe_chunks:spp->zone_block_chunks;
-            for (u_int64_t i = 0; i < indices; i++){
-                unit_idx = ventry->selected_indices[i];
-                if (zns->availability_array[unit_idx] == 2){
-                    zns->availability_array[unit_idx] = 3; // if the block was written then mark it as occupied free
-                } else if (zns->availability_array[unit_idx] == 1){
-                    zns->availability_array[unit_idx] = 0; // if the block was just assigned but never written then set it to free available
+            if (ventry->selected_indices){
+                // host might run zone reset on completly empty zone
+                uint64_t indices = (spp->vtable_mode == 4) ? spp->zone_stripe_chunks:spp->zone_block_chunks;
+                for (u_int64_t i = 0; i < indices; i++){
+                    unit_idx = ventry->selected_indices[i];
+                    if (zns->availability_array[unit_idx] == 2){
+                        zns->availability_array[unit_idx] = 3; // if the block was written then mark it as occupied free
+                    } else if (zns->availability_array[unit_idx] == 1){
+                        zns->availability_array[unit_idx] = 0; // if the block was just assigned but never written then set it to free available
+                    }
                 }
+                g_free(ventry->selected_indices); // free the allocated chunks from the zone
             }
-            free(ventry->selected_indices); // free the allocated chunks from the zone
         }
 
         (*resets)--;
@@ -1633,7 +1839,9 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
             proc_mask = NVME_PROC_READ_ONLY_ZONES;
         }
         status = zns_do_zone_op(ns, logical_zone, proc_mask, zns_offline_zone, req);
-        zns_set_zone_state(physical_zone, logical_zone->d.zs);
+        if (physical_zone){
+            zns_set_zone_state(physical_zone, logical_zone->d.zs);
+        }
         break;
     case NVME_ZONE_ACTION_SET_ZD_EXT:
         if (all || !n->zd_extension_size) {
@@ -1843,7 +2051,12 @@ static uint64_t zns_advance_status_reset_physical(NvmeRequest *req, ZNS *zns, Nv
 
     uint64_t maxlat = 0;
     uint64_t lat = 0;
+    uint64_t zone_idx = 0;
+    uint64_t block_start_offset = 0;
+    uint64_t block_idx = 0;
 
+    zone_idx = zns_get_logical_zone_idx(ns, physical_zone->d.zslba);
+    block_start_offset = spp->zone_block_chunks * zone_idx;
     // Part of zone filled
     uint64_t blocks_to_erase = 0;
     {
@@ -1854,13 +2067,17 @@ static uint64_t zns_advance_status_reset_physical(NvmeRequest *req, ZNS *zns, Nv
         uint64_t zone_chunk = n->zone_capacity / spp->blocks_per_die;
         blocks_to_erase = spp->allow_partial_zone_resets ? (filled + zone_chunk - 1) / zone_chunk : spp->blocks_per_die;
     }
-
+    femu_log("blocks to erase: %lu, block_offset: %lu\n", blocks_to_erase, block_start_offset);
     // Erase blocks in chunks
     for (uint64_t b = 0; b < blocks_to_erase; b++) {
         // Get all associated planes
-        for (int i = 0; i < spp->ways_per_zone * spp->chnls_per_zone; i++) {
+        for (int i = 0; i < spp->ways_per_zone * spp->chnls_per_zone * spp->planes_per_die; i++) {
             int step = i * (ZNS_INTERNAL_PAGE_SIZE / 512);
+            
             uint64_t my_plane_idx = zns_get_plane_idx(ns, slba + step);
+            block_idx = block_start_offset + (spp->total_planes * b) + my_plane_idx;
+            zns->wear_array[block_idx] += 1;
+            femu_log("plane index %lu\n", my_plane_idx);
             // femu_err("DEBUG erasure: %lu %lu %lu %lu %lu %u\n", slba+step, zns_get_ppn_idx(ns, slba+step), my_plane_idx, 
             //     (spp->ways * spp->planes_per_die* spp->dies_per_chip * spp->nchnls), b, spp->allow_partial_zone_resets);
             plane= &(zns->planes[my_plane_idx]);
@@ -1871,11 +2088,24 @@ static uint64_t zns_advance_status_reset_physical(NvmeRequest *req, ZNS *zns, Nv
             // femu_err("Erasure %lu %lu %lu --- %lu out of %lu\n", my_plane_idx, lat, maxlat, spp->blk_er_lat, blocks_to_erase);
         }
     }
+
+    if (spp->debug){
+        printf("\nWear array after resetting:\n");
+        for (int stripe = 0; stripe < spp->chunks_per_lun; stripe++) {
+            for (int plane = 0; plane < spp->total_planes; plane++) {
+                int idx = stripe * spp->total_planes + plane;
+                printf("%2d ", zns->wear_array[idx]);
+            }
+            printf("\n");
+        }
+        printf("\nEnd of wear array after resetting:\n");
+    } 
+        
     return maxlat;
 }
 
 
-static uint64_t zns_advance_status_reset_physical_flex(NvmeRequest *req, ZNS *zns) {
+static uint64_t zns_flex_block_advance_status_reset_physical(NvmeRequest *req, ZNS *zns) {
     ZNSParams *spp = &zns->sp;
     zns_ssd_plane *plane = NULL;
     NvmeRwCmd *rw = (NvmeRwCmd *)&req->cmd;
@@ -1885,6 +2115,7 @@ static uint64_t zns_advance_status_reset_physical_flex(NvmeRequest *req, ZNS *zn
     uint64_t lat = 0;
 
     NvmeNamespace *ns = req->ns;
+    
     zns_vtable_entry *ventry = zns_get_vtable_entry_by_slba(ns, slba);
 
     // Total blocks in a zone
@@ -1895,9 +2126,11 @@ static uint64_t zns_advance_status_reset_physical_flex(NvmeRequest *req, ZNS *zn
 
         // Only erase the blocks that were written (marked as 2)
         if (zns->availability_array[block_idx] == 2){
-            uint64_t plane_idx = zns_get_flex_plane_idx(block_idx, spp);
+            uint64_t plane_idx = zns_flex_get_plane_idx(block_idx, spp);
 
-            femu_log("[RESET] block=%lu, plane=%lu\n", block_idx, plane_idx);            
+            if (spp->debug){
+                femu_log("[RESET] block=%lu, plane=%lu\n", block_idx, plane_idx); 
+            }           
 
             plane = &zns->planes[plane_idx];
 
@@ -1913,10 +2146,50 @@ static uint64_t zns_advance_status_reset_physical_flex(NvmeRequest *req, ZNS *zn
             zns->wear_array[block_idx] += 1;
         }
     }
+    if (spp->log_path) {
+        FILE *fp = fopen(spp->log_path, "a");  // open for appending
+        if (fp) {
+            fprintf(fp, "\nWear array after resetting:\n");
+            for (int stripe = 0; stripe < spp->chunks_per_lun; stripe++) {
+                for (int plane = 0; plane < spp->total_planes; plane++) {
+                    int idx = stripe * spp->total_planes + plane;
+                    fprintf(fp, "%2d ", zns->wear_array[idx]);
+                }
+                fprintf(fp, "\n");
+            }
+            fprintf(fp, "End of wear array after resetting.\n\n");
+            fclose(fp);
+        } else {
+            femu_log("Couldn't open wear log file\n");
+        }
+    }
+
+    if (spp->debug){
+        printf("\nAvailability array after resetting (chunk):\n");
+        for (int stripe = 0; stripe < spp->chunks_per_lun; stripe++) {
+            for (int plane = 0; plane < spp->total_planes; plane++) {
+                int idx = stripe * spp->total_planes + plane;
+                printf("%2d ", zns->availability_array[idx]);
+            }
+            printf("\n");
+        }
+    } 
+
+    if (spp->debug){
+        printf("\nWear array after resetting (chunk):\n");
+        for (int stripe = 0; stripe < spp->chunks_per_lun; stripe++) {
+            for (int plane = 0; plane < spp->total_planes; plane++) {
+                int idx = stripe * spp->total_planes + plane;
+                printf("%2d ", zns->wear_array[idx]);
+            }
+            printf("\n");
+        }
+    } 
+
     return maxlat;
 }
 
-static uint64_t zns_advance_status_reset_physical_stripe_flex(NvmeRequest *req, ZNS *zns) {
+static uint64_t zns_flex_stripe_advance_status_reset_physical(NvmeRequest *req, ZNS *zns) {
     ZNSParams *spp = &zns->sp;
     zns_ssd_plane *plane = NULL;
     NvmeRwCmd *rw = (NvmeRwCmd *)&req->cmd;
@@ -1937,9 +2210,11 @@ static uint64_t zns_advance_status_reset_physical_stripe_flex(NvmeRequest *req, 
             // if stripe is written then we erase all the blocks in that stripe
             for (uint64_t lun = 0; lun < spp->total_planes; lun++){
                 block_idx = stripe_idx * spp->total_planes + lun;
-                uint64_t plane_idx = zns_get_flex_plane_idx(block_idx, spp);
+                uint64_t plane_idx = zns_flex_get_plane_idx(block_idx, spp);
 
-                femu_log("[RESET] block=%lu, stripe=%lu plane=%lu\n", block_idx, stripe_idx, plane_idx);            
+                if (spp->debug){
+                    femu_log("[RESET] block=%lu, stripe=%lu plane=%lu\n", block_idx, stripe_idx, plane_idx); 
+                }           
 
                 plane = &zns->planes[plane_idx];
 
@@ -1957,10 +2232,25 @@ static uint64_t zns_advance_status_reset_physical_stripe_flex(NvmeRequest *req, 
         }
         
     }
+
+    if (spp->debug){
+        printf("\n Availability after physical reset:\n");
+        for (int idx = 0; idx < spp->stripe_chunks; idx++) {
+            printf("%2d ", zns->availability_array[idx]);
+        }
+        printf("\n");
+
+        printf("\n Wear after reset:\n");
+        for (int idx = 0; idx < spp->stripe_chunks; idx++) {
+            printf("%2d ", zns->wear_array[idx]);
+        }
+        printf("\n");
+    }
+
     return maxlat;
 }
 
-static uint64_t zns_advance_status_reset_physical_chunk_flex(NvmeRequest *req, ZNS *zns) {
+static uint64_t zns_flex_chunk_advance_status_reset_physical(NvmeRequest *req, ZNS *zns) {
     ZNSParams *spp = &zns->sp;
     zns_ssd_plane *plane = NULL;
     NvmeRwCmd *rw = (NvmeRwCmd *)&req->cmd;
@@ -1976,22 +2266,25 @@ static uint64_t zns_advance_status_reset_physical_chunk_flex(NvmeRequest *req, Z
     for (uint64_t chunk_offset = 0; chunk_offset < spp->chunk_size; chunk_offset++) {
 
         for (uint64_t unit = 0; unit < spp->zone_block_chunks; unit++){
+
             uint64_t unit_idx = ventry->selected_indices[unit];
 
             if (zns->availability_array[unit_idx] == 2){
                 // Which plane (row) and which chunk group (column block)
                 uint64_t row = unit_idx % spp->total_planes;
-                uint64_t group_col_block = unit_idx / spp->total_planes;
+                uint64_t col = unit_idx / spp->total_planes;
                 // Starting block index of the unit
-                uint64_t unit_sblock = row + (group_col_block * spp->chunk_size) * spp->total_planes;
+                uint64_t unit_sblock = row + (col * spp->chunk_size) * spp->total_planes;
                 uint64_t block_idx = unit_sblock + chunk_offset * spp->total_planes;
                 if (chunk_offset == 1){
                     zns->availability_array[unit_idx] = 1; // reset the availability value once both chunks in the unit are erased
                     zns->wear_array[unit_idx] += 1; // update the wear array once all the blocks in the unit are erased
                 }
-                uint64_t plane_idx = zns_get_flex_plane_idx(block_idx, spp);
-
-                femu_log("[RESET] block=%lu, unit=%lu plane=%lu\n", block_idx, unit_idx, plane_idx);            
+                uint64_t plane_idx = zns_flex_get_plane_idx(block_idx, spp);
+                
+                if (spp->debug){
+                    femu_log("[RESET] unit=%lu, block=%lu, plane=%lu\n", unit_idx, block_idx, plane_idx);  
+                }          
 
                 plane = &zns->planes[plane_idx];
 
@@ -2008,14 +2301,27 @@ static uint64_t zns_advance_status_reset_physical_chunk_flex(NvmeRequest *req, Z
         
     }
 
-    printf("\nAvailability array after resetting (chunk):\n");
-    for (int stripe = 0; stripe < spp->chunks_per_lun; stripe++) {
-        for (int plane = 0; plane < spp->total_planes; plane++) {
-            int idx = stripe * spp->total_planes + plane;
-            printf("%2d ", zns->availability_array[idx]);
+    if (spp->debug){
+        printf("\nAvailability array after resetting (chunk):\n");
+        for (int stripe = 0; stripe < spp->chunks_per_lun; stripe++) {
+            for (int plane = 0; plane < spp->total_planes; plane++) {
+                int idx = stripe * spp->total_planes + plane;
+                printf("%2d ", zns->availability_array[idx]);
+            }
+            printf("\n");
         }
-        printf("\n");
-    }
+    } 
+
+    if (spp->debug){
+        printf("\nWear array after resetting (chunk):\n");
+        for (int stripe = 0; stripe < spp->chunks_per_lun; stripe++) {
+            for (int plane = 0; plane < spp->total_planes; plane++) {
+                int idx = stripe * spp->total_planes + plane;
+                printf("%2d ", zns->wear_array[idx]);
+            }
+            printf("\n");
+        }
+    } 
 
     return maxlat;
     
@@ -2042,8 +2348,10 @@ static uint16_t zns_do_append(FemuCtrl *n, NvmeRequest *req, bool append,
 
     ventry = zns_get_vtable_entry_by_slba(ns, slba);
     logical_zone = &ventry->logical_zone;
-    // Assign new zone?
-    zns_assign_physical_zone(n, ventry);
+    // Assign new zone if not assigned already
+    if (ventry->status == NVME_VZONE_UNASSIGNED){
+        zns_assign_physical_zone(n, ventry);
+    }
 
     if (!wrz) {
         status = nvme_check_mdts(n, data_size);
@@ -2124,83 +2432,64 @@ static uint16_t zns_check_dulbe(NvmeNamespace *ns, uint64_t slba, uint32_t nlb)
     return NVME_SUCCESS;
 }
 
-static inline uint64_t zns_get_flex_block(uint64_t zblock, uint64_t* selected_indices, ZNSParams* spp) {
+static inline uint64_t zns_flex_get_unit_idx(uint64_t zlpo, uint64_t* selected_indices, ZNSParams* spp) {
 
-    // physical page offset within the zone from zblock = slba - zslba
-    uint64_t ppn = (zblock >> 3) / ZNS_PAGE_PARALLELISM;
+    uint64_t stripe_capacity = spp->block_size * spp->total_planes * spp->chunk_size;
 
-    uint64_t stripe_capacity = spp->block_size * spp->total_planes * spp->chunk_size; // total pages in the stripe
+    uint64_t stripe = zlpo / stripe_capacity;
+    uint64_t plane = zlpo % spp->total_planes;
 
-    // which stripe does the page map to
-    uint64_t stripe_row = ppn / stripe_capacity;
-
-    // page offset within the current stripe
-    uint64_t offset_within_stripe = ppn % stripe_capacity;
-
-    // Determine column (plane) within the stripe based on the page offset
-    uint64_t plane = offset_within_stripe % spp->total_planes;
-    
-    uint64_t global_unit_index = selected_indices[stripe_row * spp->total_planes + plane];
-
-    return global_unit_index;
+    return selected_indices[stripe * spp->total_planes + plane];
 }
 
-static inline uint64_t zns_calc_global_block_idx(uint64_t zblock, uint64_t unit_idx, const ZNSParams* spp) {
-    // Convert zblock to physical page number
-    uint64_t ppn = (zblock >> 3) / ZNS_PAGE_PARALLELISM;
+static inline uint64_t zns_flex_stripe_get_unit_idx(uint64_t zlpo, uint64_t* selected_indices, ZNSParams* spp) {
 
-    // Which plane (row) and which chunk group (column block)
+    uint64_t stripe = zlpo / (spp->total_planes * spp->block_size); // Calculate stripe index
+
+    return selected_indices[stripe];
+}
+
+static inline uint64_t zns_flex_stripe_get_block_idx(uint64_t zlpo, uint64_t stripe, ZNSParams* spp) {
+
+    uint64_t plane = zlpo % spp->total_planes;
+
+    return stripe * spp->total_planes + plane;
+}
+
+
+static inline uint64_t zns_flex_chunk_get_block_idx(uint64_t zlpo, uint64_t unit_idx, const ZNSParams* spp) {
+
+    // Which plane (row) and which chunk stripe (column)
     uint64_t row = unit_idx % spp->total_planes;
-    uint64_t group_col_block = unit_idx / spp->total_planes;
+    uint64_t col = unit_idx / spp->total_planes;
 
-    // Starting block index of the unit
-    uint64_t unit_sblock = row + (group_col_block * spp->chunk_size) * spp->total_planes;
+    // Starting block index of the chunk
+    uint64_t unit_sblock = row + (col * spp->chunk_size) * spp->total_planes;
 
-    // Pages per unit group = total_planes × block_size × chunk_size
-    uint64_t pages_per_unit_group = spp->total_planes * spp->block_size * spp->chunk_size;
+    // Pages per chunk stripe
+    uint64_t pages_chunk_stripe = spp->total_planes * spp->block_size * spp->chunk_size;
 
-    // Offset within the current unit group
-    uint64_t local_ppn = ppn % pages_per_unit_group;
+    // Offset within the current chunk stripe
+    uint64_t local_ppn = zlpo % pages_chunk_stripe;
 
-    // Stripe index (how deep into the group)
-    uint64_t unit_block_offset = local_ppn / (spp->total_planes * spp->block_size);
+    // block stripe index within the chunk stripe, e.g chunk_size = 2 so there are 2 blocks per chunk so this index gives 0 or 1 depending on the zlpo
+    uint64_t block_stripe_idx = local_ppn / (spp->total_planes * spp->block_size);
 
     // Final global block index
-    return unit_sblock + unit_block_offset * spp->total_planes;
+    return unit_sblock + block_stripe_idx * spp->total_planes;
 }
 
 
-static inline uint64_t zns_get_flex_stripe_block(uint64_t zblock, uint64_t global_stripe_idx, ZNSParams* spp) {
-    uint64_t ppn = (zblock >> 3) / ZNS_PAGE_PARALLELISM;
-
-    uint64_t offset_in_stripe = ppn % spp->total_planes;
-
-    return global_stripe_idx * spp->total_planes + offset_in_stripe;
+static inline uint64_t zns_flex_get_plane_idx(uint64_t block, ZNSParams* spp) {
+    return block % spp->total_planes;
 }
 
-
-static inline uint64_t zns_get_global_stripe_idx(uint64_t zblock, uint64_t* selected_indices, ZNSParams* spp) {
-    // Convert zblock to physical page number (PPN)
-    uint64_t ppn = (zblock >> 3) / ZNS_PAGE_PARALLELISM;
-
-    // Calculate stripe index inside the zone
-    uint64_t stripe_idx_in_zone = ppn / (spp->total_planes * spp->block_size);
-
-    // Return the global stripe index that was selected by the solver
-    return selected_indices[stripe_idx_in_zone];
-}
-
-
-static inline uint64_t zns_get_flex_plane_idx(uint64_t unit_idx, ZNSParams* spp) {
-    return unit_idx % spp->total_planes; // TODO: return the plane index but so far only works for the block allocation startegies
-}
-
-static inline uint64_t zns_get_flex_chnl_idx(uint64_t plane_idx, ZNSParams* spp) {
+static inline uint64_t zns_flex_get_chnl_idx(uint64_t plane, ZNSParams* spp) {
     // Find the chip index based on the plane index
-    uint64_t chip_idx = (plane_idx / spp->planes_per_die) % (spp->nchnls * spp->ways);
+    uint64_t chip = (plane / spp->planes_per_die) % (spp->nchnls * spp->ways);
 
     // Map that chip index to a channel
-    return chip_idx % spp->nchnls;
+    return chip % spp->nchnls;
 }
 
 
@@ -2234,10 +2523,11 @@ static uint64_t zns_advance_status_write(ZNS *zns, NvmeRequest *req){
     uint32_t my_chnl_idx = 0;
     uint64_t chnl_stime = req->stime == 0 ? qemu_clock_get_ns(QEMU_CLOCK_REALTIME) : req->stime;
     uint64_t block_idx = 0;
-    uint64_t zblock = 0;
+    uint64_t zlpo = 0;
     uint64_t unit_idx = 0;
     
     zns_vtable_entry *ventry;
+    
     ventry = zns_get_vtable_entry_by_slba(ns, slba);
 
     if (req->stime == 0) {
@@ -2248,38 +2538,47 @@ static uint64_t zns_advance_status_write(ZNS *zns, NvmeRequest *req){
 
     uint64_t step_size = (ZNS_INTERNAL_PAGE_SIZE / 512);
     for (uint64_t i = 0; i < nlb ; i += step_size) {
-
+        uint64_t zlpo = (slba - zone->d.zslba) / LBA_PER_PAGE; // zone logical page offset
         if (spp->chunk_size == 1 && (spp->vtable_mode == 2 || spp->vtable_mode == 3)) {
-            // flexible mapping strategies (vtable mode: 2, 3)
-            block_idx = zns_get_flex_block(slba - zone->d.zslba, ventry->selected_indices, spp);
-            my_plane_idx = zns_get_flex_plane_idx(block_idx, spp);
-            my_chnl_idx = zns_get_flex_chnl_idx(my_plane_idx, spp);
+            // vtable mode: full block allocation (2) & flexible block allocation (3) when chunk size is 1
+            block_idx = zns_flex_get_unit_idx(zlpo, ventry->selected_indices, spp); // in this mapping scheme unit is a block
+            my_plane_idx = zns_flex_get_plane_idx(block_idx, spp);
+            my_chnl_idx = zns_flex_get_chnl_idx(my_plane_idx, spp);
             zns->availability_array[block_idx] = 2; // TODO: mark the unit in the availability array as occupied assigned, issue is that it does extra access we don't need to update for every page write
-            femu_log("[WRITE] slba=%lu block=%lu, plane=%lu, chnl=%lu\n",
-                slba, block_idx, my_plane_idx, my_chnl_idx);
+
+            if (spp->debug){
+                femu_log("[WRITE] slba=%lu block=%lu, plane=%lu, chnl=%lu\n", slba, block_idx, my_plane_idx, my_chnl_idx);
+            }  
         } else if (spp->chunk_size > 1 && (spp->vtable_mode == 2 || spp->vtable_mode == 3)){
-            // TODO chunked mapping (vtable mode 2, 3)
-            zblock = slba - zone->d.zslba;
-            unit_idx = zns_get_flex_block(zblock, ventry->selected_indices, spp); // gives me unit index
-            block_idx = zns_calc_global_block_idx(zblock, unit_idx, spp);
-            my_plane_idx = zns_get_flex_plane_idx(block_idx, spp);
-            my_chnl_idx  = zns_get_flex_chnl_idx(my_plane_idx, spp);
+            // vtable mode: full block allocation (2) & flexible block allocation (3) when chunk size is > 1
+            unit_idx = zns_flex_get_unit_idx(zlpo, ventry->selected_indices, spp); // in this mapping scheme unit is a chunk of blocks
+            block_idx = zns_flex_chunk_get_block_idx(zlpo, unit_idx, spp); // block index within the chunk
+            my_plane_idx = zns_flex_get_plane_idx(block_idx, spp);
+            my_chnl_idx  = zns_flex_get_chnl_idx(my_plane_idx, spp);
             zns->availability_array[unit_idx] = 2;
-            femu_log("[WRITE] slba=%lu unit=%lu, block=%lu plane=%lu, chnl=%lu\n",
-                slba, unit_idx, block_idx, my_plane_idx, my_chnl_idx);            
+    
+            if (spp->debug){
+                femu_log("[WRITE] slba=%lu chunk=%lu, block=%lu plane=%lu, chnl=%lu\n", slba, unit_idx, block_idx, my_plane_idx, my_chnl_idx);
+            }            
         } else if (spp->vtable_mode == 4){
-            zblock = slba - zone->d.zslba;
-            unit_idx = zns_get_global_stripe_idx(zblock, ventry->selected_indices, spp);
-            block_idx = zns_get_flex_stripe_block(zblock, unit_idx, spp);
-            my_plane_idx = zns_get_flex_plane_idx(block_idx, spp);
-            my_chnl_idx  = zns_get_flex_chnl_idx(my_plane_idx, spp);
+            // vtable mode: stripe allocation (4)
+            unit_idx = zns_flex_stripe_get_unit_idx(zlpo, ventry->selected_indices, spp); // in this mapping scheme unit is a stripe
+            block_idx = zns_flex_stripe_get_block_idx(zlpo, unit_idx, spp); // block index within the stripe
+            my_plane_idx = zns_flex_get_plane_idx(block_idx, spp);
+            my_chnl_idx  = zns_flex_get_chnl_idx(my_plane_idx, spp);
             zns->availability_array[unit_idx] = 2;
-            femu_log("[WRITE] slba=%lu block=%lu, plane=%lu, chnl=%lu\n",
-                slba, block_idx, my_plane_idx, my_chnl_idx);
+
+            if (spp->debug){
+                femu_log("[WRITE] slba=%lu stripe=%lu block=%lu, plane=%lu, chnl=%lu\n", slba, unit_idx, block_idx, my_plane_idx, my_chnl_idx);
+            }
         } else{
             // default mapping strategies for direct and lazy mapping (vtable mode: 0, 1 )
             my_chnl_idx=zns_get_chnl_idx(ns, slba); 
             my_plane_idx = zns_get_plane_idx(ns, slba); 
+
+            if (spp->debug){
+                femu_log("[WRITE] slba=%lu plane=%lu, chnl=%lu\n", slba, my_plane_idx, my_chnl_idx);
+            }
         }
 
         // channel index
@@ -2333,7 +2632,6 @@ static uint64_t zns_advance_status_write(ZNS *zns, NvmeRequest *req){
 static uint64_t zns_advance_status_read(ZNS *zns, NvmeRequest *req){
     // FEMU only supports 1 namespace for now (see femu.c:365) 
     // and FEMU ZNS Extension use a single thread which mean lockless operations(ch->available_time += ~~) if thread increased 
-
     NvmeRwCmd *rw = (NvmeRwCmd *)&req->cmd;
     uint64_t slba = le64_to_cpu(rw->slba);
     uint32_t nlb = (uint32_t)le16_to_cpu(rw->nlb) + 1;
@@ -2350,13 +2648,12 @@ static uint64_t zns_advance_status_read(ZNS *zns, NvmeRequest *req){
     uint32_t my_chnl_idx = 0;
     uint64_t chnl_stime =0;
     uint64_t block_idx = 0;
-    uint64_t zblock = 0;
+    uint64_t zlpo = 0;
     uint64_t unit_idx = 0;
     NvmeZone *zone;
-    {
-        zone = zns_get_zone_by_slba(ns, slba);
-        slba = zone->w_ptr;
-    }
+
+    zone = zns_get_zone_by_slba(ns, slba);
+
     zns_vtable_entry *ventry;
     ventry = zns_get_vtable_entry_by_slba(ns, slba);
 
@@ -2365,42 +2662,38 @@ static uint64_t zns_advance_status_read(ZNS *zns, NvmeRequest *req){
     // 8:4K 32:16K 64:32K 128:64K
     uint64_t step_size = (ZNS_INTERNAL_PAGE_SIZE / 512);
     for (uint64_t i = 0; i < nlb; i += step_size) {
+        uint64_t zlpo = (slba - zone->d.zslba) / LBA_PER_PAGE; // zone logical page offset
         if (spp->chunk_size == 1 && (spp->vtable_mode == 2 || spp->vtable_mode == 3)) {
             // flexible mapping strategies (vtable mode: 2, 3)
-            block_idx = zns_get_flex_block(slba - zone->d.zslba, ventry->selected_indices, spp);
-            my_plane_idx = zns_get_flex_plane_idx(block_idx, spp);
-            my_chnl_idx = zns_get_flex_chnl_idx(my_plane_idx, spp);
-            zns->availability_array[block_idx] = 2; // TODO: mark the unit in the availability array as occupied assigned, issue is that it does extra access we don't need to update for every page write
-            femu_log("[WRITE] slba=%lu block=%lu, plane=%lu, chnl=%lu\n",
-                slba, block_idx, my_plane_idx, my_chnl_idx);
+            block_idx = zns_flex_get_unit_idx(zlpo, ventry->selected_indices, spp);
+            my_plane_idx = zns_flex_get_plane_idx(block_idx, spp);
+            my_chnl_idx = zns_flex_get_chnl_idx(my_plane_idx, spp);
         } else if (spp->chunk_size > 1 && (spp->vtable_mode == 2 || spp->vtable_mode == 3)){
             // TODO chunked mapping (vtable mode 2, 3)
-            zblock = slba - zone->d.zslba;
-            unit_idx = zns_get_flex_block(zblock, ventry->selected_indices, spp); // gives me unit index
-            block_idx = zns_calc_global_block_idx(zblock, unit_idx, spp);
-            my_plane_idx = zns_get_flex_plane_idx(block_idx, spp);
-            my_chnl_idx  = zns_get_flex_chnl_idx(my_plane_idx, spp);
-            zns->availability_array[unit_idx] = 2;
-            femu_log("[WRITE] slba=%lu unit=%lu, block=%lu plane=%lu, chnl=%lu\n",
-                slba, unit_idx, block_idx, my_plane_idx, my_chnl_idx);            
+            unit_idx = zns_flex_get_unit_idx(zlpo, ventry->selected_indices, spp); // gives me unit index
+            block_idx = zns_flex_chunk_get_block_idx(zlpo, unit_idx, spp);
+            my_plane_idx = zns_flex_get_plane_idx(block_idx, spp);
+            my_chnl_idx  = zns_flex_get_chnl_idx(my_plane_idx, spp);
+            // femu_log("[READ] slba=%lu unit=%lu, block=%lu plane=%lu, chnl=%lu\n", slba, unit_idx, block_idx, my_plane_idx, my_chnl_idx);            
         } else if (spp->vtable_mode == 4){
-            zblock = slba - zone->d.zslba;
-            unit_idx = zns_get_global_stripe_idx(zblock, ventry->selected_indices, spp);
-            block_idx = zns_get_flex_stripe_block(zblock, unit_idx, spp);
-            my_plane_idx = zns_get_flex_plane_idx(block_idx, spp);
-            my_chnl_idx  = zns_get_flex_chnl_idx(my_plane_idx, spp);
-            zns->availability_array[unit_idx] = 2;
-            femu_log("[WRITE] slba=%lu block=%lu, plane=%lu, chnl=%lu\n",
-                slba, block_idx, my_plane_idx, my_chnl_idx);
-        } else{
+            unit_idx = zns_flex_stripe_get_unit_idx(zlpo, ventry->selected_indices, spp);
+            block_idx = zns_flex_stripe_get_block_idx(zlpo, unit_idx, spp);
+            my_plane_idx = zns_flex_get_plane_idx(block_idx, spp);
+            my_chnl_idx  = zns_flex_get_chnl_idx(my_plane_idx, spp);
+            // femu_log("[READ] slba=%lu block=%lu, plane=%lu, chnl=%lu\n", slba, block_idx, my_plane_idx, my_chnl_idx);
+        } else if (spp->vtable_mode == 0 || spp->vtable_mode == 1){
             // default mapping strategies for direct and lazy mapping (vtable mode: 0, 1 )
             my_chnl_idx=zns_get_chnl_idx(ns, slba); 
             my_plane_idx = zns_get_plane_idx(ns, slba); 
         }
-
+        if (spp->debug){
+            femu_log("[READ] slba=%lu, plane=%lu, chnl=%lu\n", slba, my_plane_idx, my_chnl_idx);
+        }
+        my_chnl_idx=zns_get_chnl_idx(ns, slba); 
+        my_plane_idx = zns_get_plane_idx(ns, slba); 
         chnl = &(zns->ch[my_chnl_idx]);
         plane= &(zns->planes[my_plane_idx]);
-
+        
         //Inhoinno:  Single thread emulation so assume we dont need lock per chnl
         nand_stime = (plane->next_avail_time < cmd_stime) ? cmd_stime : \
                      plane->next_avail_time;
@@ -2468,6 +2761,30 @@ static uint64_t zns_advance_status_finish(ZNS *zns, NvmeRequest *req){
     NvmeZone *logical_zone  = &n->zvtable->entries[logical_zone_idx].logical_zone;
     uint64_t pages_to_write = n->zone_capacity - (logical_zone->w_ptr - logical_zone->d.zslba);
 
+    if (!logical_zone->finish_lba){
+        logical_zone->finish_lba = logical_zone->w_ptr + pages_to_write;
+        if (spp->log_path){
+            // If log path is given save the finish config
+            uint64_t max_pages_write = n->zone_capacity; // maximum number of physical pages that would need to be finished. subtract 1 because if the zone is not written at all then they don't do dummy writes
+            // Log once when finish_lba is first set
+            uint64_t num_extra_pages = logical_zone->w_ptr - logical_zone->d.zslba;
+            FILE *fp = fopen(spp->log_path, "a");
+            if (fp) {
+                fprintf(fp, "mode,%lu,chunk_size,%lu,zone_slba,%lu,wptr,%lu,extra_stripe_lbas,%lu,lbas_finished,%lu,max_lbas,%lu\n",
+                        spp->vtable_mode,
+                        0,
+                        logical_zone->d.zslba,
+                        logical_zone->w_ptr,
+                        num_extra_pages,
+                        pages_to_write,
+                        max_pages_write);
+                fclose(fp);
+            } else {
+                femu_log("Not writing finish info\n");
+            }
+        }
+    }
+
     pages_to_write = pages_to_write > FINISH_BLOCK_SIZE ? FINISH_BLOCK_SIZE : pages_to_write;
 
     // Nothing to write, but there is some RTT latency account for that
@@ -2510,112 +2827,7 @@ static uint64_t zns_advance_status_finish(ZNS *zns, NvmeRequest *req){
     return maxlat;
 }
 
-
-uint64_t zns_advance_status_finish_flex_block(ZNS *zns, NvmeRequest *req) {
-    NvmeCmd *cmd = (NvmeCmd *)&req->cmd;
-    NvmeNamespace *ns = req->ns;
-    FemuCtrl *n = ns->ctrl;
-    ZNSParams *spp = &zns->sp;
-    uint32_t logical_zone_idx = 0;
-    uint32_t physical_zone_idx = 0;
-    zns_ssd_channel *chnl = NULL;
-    zns_ssd_plane *plane = NULL;
-    uint32_t my_plane_idx = 0;
-    uint32_t my_chnl_idx = 0;
-    uint64_t block_idx = 0;
-    uint64_t slba = 0;
-    uint64_t part_blocks = 0;
-
-    uint64_t cmd_stime = (req->stime == 0) ? qemu_clock_get_ns(QEMU_CLOCK_REALTIME) : req->stime;
-
-    uint64_t maxlat = 0;
-    uint64_t lat = 0;
-    uint64_t nand_stime = 0;
-    uint64_t chnl_stime = 0;
-
-    // Get zone info
-    zns_get_mgmt_zone_slba_idx(n, cmd, &slba, &logical_zone_idx, &physical_zone_idx);
-
-    NvmeZone *logical_zone = &n->zvtable->entries[logical_zone_idx].logical_zone;
-    slba = ((logical_zone->w_ptr - 32) - logical_zone->d.zslba)/32; // zone pointer offset within the zone
-    zns_vtable_entry *ventry = zns_get_vtable_entry_by_slba(ns, slba);
-
-    uint64_t current_stripe = slba / (spp->total_planes * spp->block_size); // The offset of the current stripe
-    uint64_t stripe_sblock = current_stripe * spp->total_planes; // the starting block index of the current stripe
-
-    uint64_t start_lba = (logical_zone->w_ptr - logical_zone->d.zslba)/32; // lbas are 0 indexed
-    uint64_t num_extra_pages = start_lba % (spp->total_planes * spp->block_size); // number of extra pages written in current stripe
-    femu_log("start_lba=%lu, num_extra_pages=%lu", start_lba, num_extra_pages);
-
-    if (!logical_zone->finsh_blocks){
-        if (num_extra_pages < spp->total_planes){
-            logical_zone->finsh_blocks = num_extra_pages; // means that less than 1 stripe was written. for example 3 pages written on 3 planes so the finish stripes across these 3 planes only
-        }else{
-            logical_zone->finsh_blocks = spp->total_planes; // if the number of extra pages > spp->total_planes means that we have to stripe writes across the entire stripe
-        }
-    }
-
-    uint64_t total_pages = logical_zone->finsh_blocks * spp->block_size; // total number of pages we have to finish
-    uint64_t pages_to_write = total_pages - num_extra_pages; //pages to finish
-
-    logical_zone->finish_lba = logical_zone->w_ptr + pages_to_write * 32;
-
-    // If zone is already full or nothing to do
-    if (pages_to_write == 0 || pages_to_write == n->zone_capacity) {
-        femu_log("Nothing to finish\n");
-        slba = logical_zone->w_ptr;
-        my_chnl_idx = zns_get_chnl_idx(ns, slba);
-
-        chnl = &(zns->ch[my_chnl_idx]);
-
-        chnl_stime = (chnl->next_ch_avail_time < cmd_stime) ? cmd_stime : chnl->next_ch_avail_time;
-        chnl->next_ch_avail_time = chnl_stime + spp->ch_xfer_lat;
-
-        lat = chnl->next_ch_avail_time - cmd_stime;
-        maxlat = (maxlat < lat) ? lat : maxlat;
-
-        return maxlat;
-    }
-
-    // Cap to finish batch size
-    if (pages_to_write > FINISH_BLOCK_SIZE / 32){
-        pages_to_write = FINISH_BLOCK_SIZE / 32;
-    }
-
-    femu_log("sblock=%lu, pages_to_write=%lu\n", stripe_sblock, pages_to_write);
-
-    uint64_t block_offset =0;
-
-    for (uint64_t i = start_lba; i < start_lba + pages_to_write; i++) {
-
-        block_offset = stripe_sblock + (i % logical_zone->finsh_blocks);
-        block_idx = ventry->selected_indices[block_offset];
-        my_plane_idx = zns_get_flex_plane_idx(block_idx, spp);
-        my_chnl_idx  = zns_get_flex_chnl_idx(my_plane_idx, spp);
-
-        femu_log("[FINISH] lba=%lu, block_offs=%lu block=%lu, partb=%lu plane=%u, chnl=%u\n",
-                 i, block_offset, block_idx, logical_zone->finsh_blocks, my_plane_idx, my_chnl_idx);
-
-        chnl = &zns->ch[my_chnl_idx];
-        plane = &zns->planes[my_plane_idx];
-
-        chnl_stime = (chnl->next_ch_avail_time < cmd_stime) ?
-                     cmd_stime : chnl->next_ch_avail_time;
-        chnl->next_ch_avail_time = chnl_stime + spp->ch_xfer_lat;
-
-        nand_stime = (plane->next_avail_time < chnl->next_ch_avail_time) ?
-                     chnl->next_ch_avail_time : plane->next_avail_time;
-        plane->next_avail_time = nand_stime + spp->pg_wr_lat;
-
-        lat = plane->next_avail_time - cmd_stime;
-        maxlat = (maxlat < lat) ? lat : maxlat;
-    }
-
-    femu_log("Total simulated latency = %lu ns\n", maxlat);
-    return maxlat;
-}
-
-uint64_t zns_advance_status_finish_flex_block_chunk(ZNS *zns, NvmeRequest *req) {
+uint64_t zns_flex_chunk_advance_status_finish(ZNS *zns, NvmeRequest *req) {
     NvmeCmd *cmd = (NvmeCmd *)&req->cmd;
     NvmeNamespace *ns = req->ns;
     FemuCtrl *n = ns->ctrl;
@@ -2637,39 +2849,84 @@ uint64_t zns_advance_status_finish_flex_block_chunk(ZNS *zns, NvmeRequest *req) 
     uint64_t lat = 0;
     uint64_t nand_stime = 0;
     uint64_t chnl_stime = 0;
-
+    uint64_t block_offset =0;
+    uint64_t row = 0;
+    uint64_t group_col_block = 0;
+    uint64_t unit_sblock =0;
+    uint64_t unit_idx = 0;
     // Get zone info
     zns_get_mgmt_zone_slba_idx(n, cmd, &slba, &logical_zone_idx, &physical_zone_idx);
+    
+    zns_vtable_entry *ventry = zns_get_vtable_entry_by_slba(ns, slba);
 
     NvmeZone *logical_zone = &n->zvtable->entries[logical_zone_idx].logical_zone;
+    
     slba = ((logical_zone->w_ptr - 32) - logical_zone->d.zslba) / 32; // zone pointer offset within the zone
-    zns_vtable_entry *ventry = zns_get_vtable_entry_by_slba(ns, slba);
+    
 
     uint64_t current_stripe = slba / (spp->total_planes * spp->block_size * spp->chunk_size); // The offset of the current stripe
     uint64_t stripe_sblock = current_stripe * spp->total_planes; // the starting unit index of the current stripe
 
     uint64_t start_lba = (logical_zone->w_ptr - logical_zone->d.zslba) / 32; // lbas are 0 indexed
     uint64_t num_extra_pages = start_lba % (spp->total_planes * spp->block_size * spp->chunk_size); // number of extra pages written in current stripe
-    femu_log("start_lba=%lu, num_extra_pages=%lu", start_lba, num_extra_pages);
-
-    if (!logical_zone->finsh_blocks){
-        if (num_extra_pages < spp->total_planes){
-            logical_zone->finsh_blocks = num_extra_pages * spp->chunk_size; // means that less than 1 stripe was written. for example 3 pages written on 3 planes so the finish stripes across these 3 planes only
-        }else{
-            logical_zone->finsh_blocks = spp->total_planes * spp->chunk_size; // if the number of extra pages > spp->total_planes means that we have to stripe writes across the entire stripe
-        }
+    
+    if (spp->debug){
+        femu_err("start_lba=%lu, num_extra_pages=%lu\n", start_lba, num_extra_pages);
     }
 
-    uint64_t total_pages = logical_zone->finsh_blocks * spp->block_size; // total number of pages we have to finish
+    if (!logical_zone->finish_blocks){
+        if (num_extra_pages < spp->total_planes){
+            logical_zone->finish_blocks = num_extra_pages * spp->chunk_size; // means that less than 1 stripe was written. for example 3 pages written on 3 planes so the finish stripes across these 3 planes only
+        }else{
+            logical_zone->finish_blocks = spp->total_planes * spp->chunk_size; // if the number of extra pages > spp->total_planes means that we have to stripe writes across the entire stripe
+        }
+    }
+  
+
+    uint64_t total_pages = logical_zone->finish_blocks * spp->block_size; // total number of pages we have to finish
     uint64_t pages_to_write = total_pages - num_extra_pages; //pages to finish
 
-    logical_zone->finish_lba = logical_zone->w_ptr + pages_to_write * 32;
-
+    if (!logical_zone->finish_lba){
+        logical_zone->finish_lba = logical_zone->w_ptr + pages_to_write * LBA_PER_PAGE;
+        if (spp->log_path){
+            // If log path is given save the finish config
+            uint64_t max_pages_write = spp->block_size * spp->total_planes * spp->chunk_size;
+            // Log once when finish_lba is first set
+            FILE *fp = fopen(spp->log_path, "a");
+            if (fp) {
+                fprintf(fp, "mode,%lu,chunk_size,%lu,zone_slba,%lu,wptr,%lu,stripe_pages_written,%lu,pages_finished,%lu,max_pages,%lu\n",
+                        spp->vtable_mode,
+                        spp->chunk_size,
+                        logical_zone->d.zslba,
+                        logical_zone->w_ptr,
+                        num_extra_pages,
+                        pages_to_write,
+                        max_pages_write);
+                fclose(fp);
+            } else {
+                femu_log("Not writing finish info\n");
+            }
+        }
+    }
+   
     // If zone is already full or nothing to do
     if (pages_to_write == 0 || pages_to_write == n->zone_capacity) {
-        femu_log("Nothing to finish\n");
-        slba = logical_zone->w_ptr;
-        my_chnl_idx = zns_get_chnl_idx(ns, slba);
+        femu_err("Nothing to finish\n");
+        block_offset = stripe_sblock + (start_lba % spp->total_planes);
+        femu_err("block offset: %d\n", block_offset);
+        unit_idx = ventry->selected_indices[block_offset]; 
+
+        if (spp->chunk_size > 1){
+            row = unit_idx % spp->total_planes;
+            group_col_block = unit_idx / spp->total_planes;
+            // Starting block index of the unit
+            unit_sblock = row + (group_col_block * spp->chunk_size) * spp->total_planes;
+            glob_block_idx = unit_sblock + (start_lba / (spp->block_size * spp->total_planes )) * spp->total_planes;
+            unit_idx = glob_block_idx;
+        }
+
+        my_plane_idx = zns_flex_get_plane_idx(unit_idx, spp);
+        my_chnl_idx  = zns_flex_get_chnl_idx(my_plane_idx, spp);
 
         chnl = &(zns->ch[my_chnl_idx]);
 
@@ -2681,31 +2938,36 @@ uint64_t zns_advance_status_finish_flex_block_chunk(ZNS *zns, NvmeRequest *req) 
 
         return maxlat;
     }
-
+    
     // Cap to finish batch size
     if (pages_to_write > FINISH_BLOCK_SIZE / 32){
         pages_to_write = FINISH_BLOCK_SIZE / 32;
     }
+    if (spp->debug){
+        femu_log("sblock=%lu, pages_to_write=%lu partb=%lu \n", stripe_sblock, pages_to_write, logical_zone->finish_blocks);
+    }
 
-    femu_log("sblock=%lu, pages_to_write=%lu\n", stripe_sblock, pages_to_write);
-
-    uint64_t block_offset =0;
-
+    
     for (uint64_t i = start_lba; i < start_lba + pages_to_write; i++) {
 
-        block_offset = stripe_sblock + (i % (logical_zone->finsh_blocks / spp->chunk_size));
-        block_idx = ventry->selected_indices[block_offset]; 
-        uint64_t row = block_idx % spp->total_planes;
-        uint64_t group_col_block = block_idx / spp->total_planes;
-        // Starting block index of the unit
-        uint64_t unit_sblock = row + (group_col_block * spp->chunk_size) * spp->total_planes;
-        uint64_t glob_block_idx = unit_sblock + (i/(spp->block_size *(logical_zone->finsh_blocks / spp->chunk_size) )) * spp->total_planes;
+        block_offset = stripe_sblock + (i % (logical_zone->finish_blocks / spp->chunk_size));
+        unit_idx = ventry->selected_indices[block_offset]; 
 
-        my_plane_idx = zns_get_flex_plane_idx(glob_block_idx, spp);
-        my_chnl_idx  = zns_get_flex_chnl_idx(my_plane_idx, spp);
+        if (spp->chunk_size > 1){
+            row = unit_idx % spp->total_planes;
+            group_col_block = unit_idx / spp->total_planes;
+            // Starting block index of the unit
+            unit_sblock = row + (group_col_block * spp->chunk_size) * spp->total_planes;
+            glob_block_idx = unit_sblock + (i/(spp->block_size *(logical_zone->finish_blocks / spp->chunk_size) )) * spp->total_planes;
+            unit_idx = glob_block_idx;
+        }
 
-        femu_log("[FINISH] lba=%lu unit=%lu blockidx=%lu partb=%lu plane=%u, chnl=%u\n",
-                 i, block_idx, glob_block_idx, logical_zone->finsh_blocks, my_plane_idx, my_chnl_idx);
+        my_plane_idx = zns_flex_get_plane_idx(unit_idx, spp);
+        my_chnl_idx  = zns_flex_get_chnl_idx(my_plane_idx, spp);
+        if (spp->debug){
+            femu_log("[FINISH] lba=%lu chunk=%lu block=%lu plane=%u, chnl=%u\n",
+                    i, unit_idx, unit_idx, my_plane_idx, my_chnl_idx);
+        }
 
         chnl = &zns->ch[my_chnl_idx];
         plane = &zns->planes[my_plane_idx];
@@ -2721,13 +2983,138 @@ uint64_t zns_advance_status_finish_flex_block_chunk(ZNS *zns, NvmeRequest *req) 
         lat = plane->next_avail_time - cmd_stime;
         maxlat = (maxlat < lat) ? lat : maxlat;
     }
-
-    femu_log("Total simulated latency = %lu ns\n", maxlat);
+    
+    if (spp->debug){
+        femu_log("Total simulated latency = %lu ns\n", maxlat);
+    }
     return maxlat;
 }
 
 
-uint64_t zns_advance_status_finish_flex(ZNS *zns, NvmeRequest *req) {
+// static uint64_t zns_flex_stripe_advance_status_finish(ZNS *zns, NvmeRequest *req) {
+//     NvmeCmd *cmd = (NvmeCmd *)&req->cmd;
+//     NvmeNamespace *ns = req->ns;
+//     FemuCtrl *n = ns->ctrl;
+//     ZNSParams *spp = &zns->sp;
+//     uint32_t logical_zone_idx = 0;
+//     uint32_t physical_zone_idx = 0;
+//     zns_ssd_channel *chnl = NULL;
+//     zns_ssd_plane *plane = NULL;
+//     uint32_t my_plane_idx = 0;
+//     uint32_t my_chnl_idx = 0;
+//     uint64_t block_idx = 0;
+//     uint64_t slba = 0;
+
+//     uint64_t cmd_stime = (req->stime == 0) ? qemu_clock_get_ns(QEMU_CLOCK_REALTIME) : req->stime;
+
+//     uint64_t maxlat = 0;
+//     uint64_t lat = 0;
+//     uint64_t nand_stime = 0;
+//     uint64_t chnl_stime = 0;
+
+//     zns_get_mgmt_zone_slba_idx(n, cmd, &slba, &logical_zone_idx, &physical_zone_idx);
+//     zns_vtable_entry *ventry = zns_get_vtable_entry_by_slba(ns, slba);
+//     NvmeZone *logical_zone = &n->zvtable->entries[logical_zone_idx].logical_zone;
+
+//     slba = logical_zone->w_ptr - 1;
+//     uint64_t zlpo_lba = slba - logical_zone->d.zslba;
+
+//     uint64_t written_page_idx = zlpo_lba / LBA_PER_PAGE;
+//     uint64_t unit_idx = zns_flex_stripe_get_unit_idx(written_page_idx, ventry->selected_indices, spp);
+
+//     uint64_t stripe_slba_start = logical_zone->d.zslba + unit_idx * spp->block_size * spp->total_planes * LBA_PER_PAGE;
+//     uint64_t current_lba_offset = zlpo_lba % (spp->block_size * spp->total_planes * LBA_PER_PAGE);
+//     uint64_t finish_start_lba = stripe_slba_start + current_lba_offset;
+//     uint64_t finish_end_lba = stripe_slba_start + spp->block_size * spp->total_planes * LBA_PER_PAGE;
+//     uint64_t lbas_to_write = finish_end_lba - finish_start_lba;
+
+//     if (!logical_zone->finish_lba) {
+//         logical_zone->finish_lba = slba + lbas_to_write;
+
+//         if (spp->log_path) {
+//             FILE *fp = fopen(spp->log_path, "a");
+//             if (fp) {
+//                 fprintf(fp,
+//                     "mode,%lu,chunk_size,%lu,zone_slba,%lu,wptr,%lu,stripe_lbas_written,%lu,lbas_finished,%lu,max_lbas,%lu\n",
+//                     spp->vtable_mode,
+//                     0,
+//                     logical_zone->d.zslba,
+//                     logical_zone->w_ptr,
+//                     finish_start_lba - stripe_slba_start,
+//                     lbas_to_write,
+//                     spp->block_size * spp->total_planes * LBA_PER_PAGE);
+//                 fclose(fp);
+//             } else {
+//                 femu_log("Not writing finish info\n");
+//             }
+//         }
+//     }
+
+//     if (lbas_to_write == 0 || lbas_to_write == n->zone_capacity) {
+//         femu_log("Nothing to finish\n");
+
+//         uint64_t page_offset = zlpo_lba / LBA_PER_PAGE;
+//         block_idx = unit_idx * spp->total_planes + page_offset % spp->total_planes;
+
+//         my_plane_idx = zns_flex_get_plane_idx(block_idx, spp);
+//         my_chnl_idx = zns_flex_get_chnl_idx(my_plane_idx, spp);
+
+//         chnl = &zns->ch[my_chnl_idx];
+//         chnl_stime = (chnl->next_ch_avail_time < cmd_stime) ? cmd_stime : chnl->next_ch_avail_time;
+//         chnl->next_ch_avail_time = chnl_stime + spp->ch_xfer_lat;
+
+//         lat = chnl->next_ch_avail_time - cmd_stime;
+//         maxlat = (maxlat < lat) ? lat : maxlat;
+
+//         return maxlat;
+//     }
+
+//     if (spp->debug) {
+//         femu_log("zlpo_lba=%lu, unit_idx=%lu\n", zlpo_lba, unit_idx);
+//         femu_log("stripe_slba_start=%lu, current_lba=%lu, stripe_end_lba=%lu, lbas_to_write=%lu\n",
+//                  stripe_slba_start, finish_start_lba, finish_end_lba, lbas_to_write);
+//     }
+
+//     // Cap to batch size
+//     if (lbas_to_write > FINISH_BLOCK_SIZE * LBA_PER_PAGE)
+//         lbas_to_write = FINISH_BLOCK_SIZE * LBA_PER_PAGE;
+
+//     // STEP SIZE (internal page)
+//     uint64_t step_size = ZNS_INTERNAL_PAGE_SIZE / 512;
+
+//     for (uint64_t lba = finish_start_lba; lba < finish_start_lba + lbas_to_write; lba += step_size) {
+//         uint64_t page_idx = (lba - stripe_slba_start) / LBA_PER_PAGE;
+//         block_idx = unit_idx * spp->total_planes + page_idx % spp->total_planes;
+
+//         my_plane_idx = zns_flex_get_plane_idx(block_idx, spp);
+//         my_chnl_idx = zns_flex_get_chnl_idx(my_plane_idx, spp);
+
+//         if (spp->debug) {
+//             femu_log("[FINISH] lba=%lu, page=%lu, block=%lu, plane=%u, chnl=%u\n",
+//                      lba, page_idx, block_idx, my_plane_idx, my_chnl_idx);
+//         }
+
+//         chnl = &zns->ch[my_chnl_idx];
+//         plane = &zns->planes[my_plane_idx];
+
+//         chnl_stime = (chnl->next_ch_avail_time < cmd_stime) ? cmd_stime : chnl->next_ch_avail_time;
+//         chnl->next_ch_avail_time = chnl_stime + spp->ch_xfer_lat;
+
+//         nand_stime = (plane->next_avail_time < chnl->next_ch_avail_time) ? chnl->next_ch_avail_time : plane->next_avail_time;
+//         plane->next_avail_time = nand_stime + spp->pg_wr_lat;
+
+//         lat = plane->next_avail_time - cmd_stime;
+//         maxlat = (maxlat < lat) ? lat : maxlat;
+//     }
+
+//     return maxlat;
+// }
+
+
+
+
+
+static uint64_t zns_flex_stripe_advance_status_finish(ZNS *zns, NvmeRequest *req) {
     NvmeCmd *cmd = (NvmeCmd *)&req->cmd;
     NvmeNamespace *ns = req->ns;
     FemuCtrl *n = ns->ctrl;
@@ -2747,29 +3134,52 @@ uint64_t zns_advance_status_finish_flex(ZNS *zns, NvmeRequest *req) {
     uint64_t lat = 0;
     uint64_t nand_stime = 0;
     uint64_t chnl_stime = 0;
-
+    
     // Get zone info
     zns_get_mgmt_zone_slba_idx(n, cmd, &slba, &logical_zone_idx, &physical_zone_idx);
-
-    NvmeZone *logical_zone = &n->zvtable->entries[logical_zone_idx].logical_zone;
-    slba = logical_zone->w_ptr - 32; // zone pointer always points to the next block so subtract 32 that is equivalent to 1 physical page
-
     zns_vtable_entry *ventry = zns_get_vtable_entry_by_slba(ns, slba);
+    NvmeZone *logical_zone = &n->zvtable->entries[logical_zone_idx].logical_zone;
 
-    uint64_t zblock = slba - logical_zone->d.zslba; // block index within the zone
-    uint64_t unit_idx = zns_get_global_stripe_idx(zblock, ventry->selected_indices, spp); // which stripe is this block mapped to
+    slba = logical_zone->w_ptr - 1; // zone pointer always points to the next lba, so subtract 32 (equivalent to 1 physical page)
+    uint64_t zlpo = slba - logical_zone->d.zslba; // written page count
+    uint64_t unit_idx = zns_flex_stripe_get_unit_idx(zlpo / LBA_PER_PAGE, ventry->selected_indices, spp); // which stripe index is this page mapped to
 
-    uint64_t stripe_sppn = unit_idx * spp->block_size * spp->total_planes; // starting physical page number of that stripe
-    uint64_t current_ppn = stripe_sppn + (zblock / 32) % (spp->block_size * spp->total_planes); // last written page
-    uint64_t last_ppn = (stripe_sppn + spp->block_size * spp->total_planes) - 1; // last physicla page number of this stripe (page indexes are 0 based so subtract 1)
+    uint64_t stripe_sppn = unit_idx * spp->block_size * LBA_PER_PAGE * spp->total_planes; // starting physical page number of that stripe
+    uint64_t current_ppn = stripe_sppn + (zlpo % (spp->block_size * LBA_PER_PAGE * spp->total_planes)); // last written page offset
+    uint64_t last_ppn = (stripe_sppn + spp->block_size * LBA_PER_PAGE * spp->total_planes) - 1; // last physical page offset of this stripe (page indexes are 0 based so subtract 1)
     uint64_t pages_to_write = last_ppn - current_ppn;
-    logical_zone->finish_lba = slba + pages_to_write * 32; // multiply by 32 to match the lba exposed on host size
+    uint64_t next_ppn = current_ppn + 1; // add 1 to current page because the pages are 0 indexed
 
+    if (!logical_zone->finish_lba){
+        logical_zone->finish_lba = slba + pages_to_write; // multiply by 32 to match the lba exposed on host side
+        if (spp->log_path){
+            // If log path is given save the finish config
+            uint64_t max_pages_write = spp->block_size * LBA_PER_PAGE * spp->total_planes;
+            // Log once when finish_lba is first set
+            FILE *fp = fopen(spp->log_path, "a");
+            if (fp) {
+                fprintf(fp, "mode,%lu,chunk_size,%lu,zone_slba,%lu,wptr,%lu,extra_stripe_lbas,%lu,lbas_finished,%lu,max_lbas,%lu\n",
+                        spp->vtable_mode,
+                        0,
+                        logical_zone->d.zslba,
+                        logical_zone->w_ptr,
+                        next_ppn - stripe_sppn,
+                        pages_to_write,
+                        max_pages_write);
+                fclose(fp);
+            } else {
+                femu_log("Not writing finish info\n");
+            }
+        }
+    }
     // If zone is already full or nothing to do
-    if (pages_to_write == 0 || pages_to_write == n->zone_capacity) {
-        femu_log("Nothing to finish\n");
+    if (pages_to_write == 0 || pages_to_write == n->zone_capacity || logical_zone->w_ptr == logical_zone->d.zslba) {
+        femu_err("Nothing to finish\n");
         slba = logical_zone->w_ptr;
-        my_chnl_idx = zns_get_chnl_idx(ns, slba);
+        block_idx = unit_idx * spp->total_planes + next_ppn % spp->total_planes; // block index given the page and stripe
+
+        my_plane_idx = zns_flex_get_plane_idx(block_idx, spp);
+        my_chnl_idx  = zns_flex_get_chnl_idx(my_plane_idx, spp);
 
         chnl = &(zns->ch[my_chnl_idx]);
 
@@ -2782,24 +3192,27 @@ uint64_t zns_advance_status_finish_flex(ZNS *zns, NvmeRequest *req) {
         return maxlat;
     }
 
+    if (spp->debug){
+        femu_log("zlpo=%lu, unit_idx=%lu\n", zlpo, unit_idx);
+        femu_log("stripe_sppn=%lu, current_ppn=%lu, last_stripe_ppn=%lu, pages_to_write=%lu\n", stripe_sppn, current_ppn, last_ppn, pages_to_write);
+    }    
+
     // Cap to finish batch size
-    if (pages_to_write > FINISH_BLOCK_SIZE/32)
-        pages_to_write = FINISH_BLOCK_SIZE/32;
+    if (pages_to_write > FINISH_BLOCK_SIZE){
+        pages_to_write = FINISH_BLOCK_SIZE;
+    }
+    uint64_t page = 0;
+    for (uint64_t i = next_ppn; i < next_ppn + pages_to_write; i += LBA_PER_PAGE) {
 
-    femu_log("zblock=%lu, unit_idx=%lu\n", zblock, unit_idx);
-    femu_log("stripe_sppn=%lu, current_ppn=%lu, last_ppn=%lu, pages_to_write=%lu\n",
-             stripe_sppn, current_ppn, last_ppn, pages_to_write);
+        page = i / LBA_PER_PAGE;
+        block_idx = unit_idx * spp->total_planes + page % spp->total_planes; // block index given the page and stripe
 
-    // add 1 to current page becase the pages are 0 indexed
-    for (uint64_t i = current_ppn + 1; i < current_ppn + 1 + pages_to_write; i++) {
+        my_plane_idx = zns_flex_get_plane_idx(block_idx, spp);
+        my_chnl_idx  = zns_flex_get_chnl_idx(my_plane_idx, spp);
 
-        block_idx = unit_idx * spp->total_planes + i % spp->total_planes; // block index given the page and stripe
-
-        my_plane_idx = zns_get_flex_plane_idx(block_idx, spp);
-        my_chnl_idx  = zns_get_flex_chnl_idx(my_plane_idx, spp);
-
-        femu_log("[FINISH] ppn=%lu, block=%lu, plane=%u, chnl=%u\n",
-                 i, block_idx, my_plane_idx, my_chnl_idx);
+        if (spp->debug){
+            femu_log("[FINISH] lba=%lu, page=%lu, block=%lu, plane=%u, chnl=%u\n", i, page, block_idx, my_plane_idx, my_chnl_idx);
+        }
 
         chnl = &zns->ch[my_chnl_idx];
         plane = &zns->planes[my_plane_idx];
@@ -2816,7 +3229,7 @@ uint64_t zns_advance_status_finish_flex(ZNS *zns, NvmeRequest *req) {
         maxlat = (maxlat < lat) ? lat : maxlat;
     }
 
-    femu_log("Total simulated latency = %lu ns\n", maxlat);
+    // femu_log("Total simulated latency = %lu ns\n", maxlat);
     return maxlat;
 }
 
@@ -2968,7 +3381,9 @@ static uint16_t zns_io_write(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     ventry = zns_get_vtable_entry_by_slba(ns, slba);
     logical_zone = &ventry->logical_zone;
     // Assign new zone?
-    zns_assign_physical_zone(n, ventry);
+    if (ventry->status == NVME_VZONE_UNASSIGNED){
+        zns_assign_physical_zone(n, ventry);
+    }
 
     status = nvme_check_mdts(n, data_size);
     if (status) {
@@ -3008,18 +3423,18 @@ static uint16_t zns_io_write(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         ventry->status = NVME_VZONE_ACTIVE;
         reset = true;
     } else if ((spp->vtable_mode == 2 || spp->vtable_mode == 3) && spp->chunk_size == 1 && ventry->status == NVME_VZONE_INVALID){
-        femu_log("[Block] Resetting physical zone first %lu\n", zidx);
-        reqtime = zns_advance_status_reset_physical_flex(req, zns);
+        femu_log("[Block] Resetting physical blocks for logical zone %lu\n", zidx);
+        reqtime = zns_flex_block_advance_status_reset_physical(req, zns);
         ventry->status = NVME_VZONE_ACTIVE;
         reset = true;        
     } else if (spp->vtable_mode == 4 && ventry->status == NVME_VZONE_INVALID){
-        femu_log("[Stripe] Resetting physical zone first %lu\n", zidx);
-        reqtime = zns_advance_status_reset_physical_stripe_flex(req, zns);
+        femu_log("[Stripe] Resetting physical blocks for logical zone %lu\n", zidx);
+        reqtime = zns_flex_stripe_advance_status_reset_physical(req, zns);
         ventry->status = NVME_VZONE_ACTIVE;
         reset = true;  
     } else if (spp->chunk_size > 1 && ventry->status == NVME_VZONE_INVALID){
-        femu_log("[Chunk] Resetting physical zone first %lu\n", zidx);
-        reqtime = zns_advance_status_reset_physical_chunk_flex(req, zns);
+        femu_log("[Chunk] Resetting physical blocks for logical zone %lu\n", zidx);
+        reqtime = zns_flex_chunk_advance_status_reset_physical(req, zns);
         ventry->status = NVME_VZONE_ACTIVE;
         reset = true;  
     }
@@ -3030,7 +3445,7 @@ static uint16_t zns_io_write(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         goto err;
     }
     tmpreqtime = zns_advance_status(n,ns,cmd,req);
-    if (reset) {
+    if (spp->debug && reset) {
         femu_err("Resetting physical zone time %lu %lu %lu\n", reqtime, tmpreqtime, tmpreqtime > reqtime ? tmpreqtime : reqtime);
     }
     reqtime = tmpreqtime > reqtime ? tmpreqtime : reqtime;
@@ -3097,8 +3512,8 @@ static int zns_init_zone_cap(FemuCtrl *n)
     n->zone_size_bs = spp->zone_size;
     n->zone_cap_bs = spp->zone_cap_param;
     n->cross_zone_read = true;
-    n->max_active_zones = 0;
-    n->max_open_zones = 0;
+    n->max_active_zones = 14;
+    n->max_open_zones = 14;
     n->zd_extension_size = 0;
 
     return 0;
@@ -3177,6 +3592,8 @@ static void zns_init_vtable(FemuCtrl * n, ZNSParams *spp) {
 
     else {
         for (i = 0; i < n->num_zones; i++, zone++, ventry++) {
+            QTAILQ_INSERT_HEAD(&n->zvtable->free_zones, zone, entry);
+            
             if (start + zone_size > capacity) {
                 zone_size = capacity - start;
             }
@@ -3226,7 +3643,7 @@ static void znsssd_init_params(FemuCtrl * n, ZNSParams *spp){
     spp->block_size     = spp_param->block_size;
     
     uint64_t bytes_per_block = spp->block_size * ZNS_INTERNAL_PAGE_SIZE;
-    uint64_t zns_stripe_size_bs = bytes_per_block * spp->ways_per_zone * spp->chnls_per_zone;
+    uint64_t zns_stripe_size_bs = bytes_per_block * spp->ways_per_zone * spp->chnls_per_zone * spp->planes_per_die;
     femu_err("Stripe size %lu %lu %lu\n", n->zone_cap_bs, zns_stripe_size_bs, n->zone_cap_bs % zns_stripe_size_bs);
     assert((n->zone_capacity * lbasz) % zns_stripe_size_bs == 0);
     spp->blocks_per_die = (n->zone_capacity * lbasz)  / zns_stripe_size_bs;
@@ -3239,19 +3656,28 @@ static void znsssd_init_params(FemuCtrl * n, ZNSParams *spp){
         / spp->nchnls / spp->ways;
     spp->total_chips         = (((int64_t)n->memsz) * 1024 * 1024) 
         / ZNS_EXTERNAL_PAGE_SIZE / spp->csze_pages;
-        
-    spp->chunk_size = 2; /* TODO stripe or block chunk size depending on the vtable mode*/
-    spp->zone_block_chunks = 32; // TODO has to be power of 2
+    
+    uint64_t ssd_capacity = n->num_zones * n->zone_capacity * lbasz; // use SSD capacity (for calcualting SSD geometry) instead of size because ZNS allows the capacity to be lower than the size
+
+
+    spp->chunk_size = spp_param->chunk_size; // block chunk size
     spp->total_planes = spp->ways * spp->planes_per_die* spp->dies_per_chip * spp->nchnls;
-    spp->total_blocks = (((int64_t)n->memsz) * 1024 * 1024) / (spp->block_size * ZNS_INTERNAL_PAGE_SIZE);
-    spp->total_stripes = (((int64_t)n->memsz) * 1024 * 1024) / (spp->total_planes * spp->block_size * ZNS_INTERNAL_PAGE_SIZE);   
+    spp->total_blocks = ssd_capacity / (spp->block_size * ZNS_INTERNAL_PAGE_SIZE);
+    spp->total_stripes = ssd_capacity / (spp->total_planes * spp->block_size * ZNS_INTERNAL_PAGE_SIZE);   
+    spp->block_chunks = spp->total_blocks / spp->chunk_size;
+    spp->zone_block_chunks = spp->block_chunks / spp->zones; // total number of blocks in the zone
+
+    spp->debug = spp_param->debug;
+    spp->log_path = spp_param->log_path;
+    spp->log_path_time = spp_param->log_path_time;
+    femu_log("debug=%d\n", spp->debug);
+    femu_log("number of zones: %lu\n", spp->zones);
 
     if (spp->vtable_mode == 2){
         /*
           spp->vtable_mode == 2: fully striped chunk allocation
         */
-        spp->block_chunks = spp->total_blocks / spp->chunk_size;
-        // enforce full striping where each LUN contributes equal num chunks
+        femu_log("zone block chunks %lu\n", spp->zone_block_chunks);
         spp->max_chunks_per_lun = spp->zone_block_chunks / spp->total_planes;
         spp->min_luns = spp->total_planes;
         zns->availability_array = g_malloc0(sizeof(uint8_t) * spp->block_chunks);
@@ -3260,9 +3686,10 @@ static void znsssd_init_params(FemuCtrl * n, ZNSParams *spp){
         /*
           spp->vtable_mode == 3: flexible chunk allocation
         */
-        spp->block_chunks = spp->total_blocks / spp->chunk_size;
-        spp->max_chunks_per_lun = 3; // TODO manually configured by the user
-        spp->min_luns = 16; // TODO manually configured by the user
+        femu_log("zone block chunks %lu\n", spp->zone_block_chunks);
+        spp->max_chunks_per_lun = spp_param->max_chunks_per_lun;
+        spp->min_luns = spp_param->min_luns; 
+        femu_log("max_chunk_per_lun=%lu, min_lun=%lu\n", spp->max_chunks_per_lun, spp->min_luns);
         zns->availability_array = g_malloc0(sizeof(uint8_t) * spp->block_chunks);
         zns->wear_array = g_malloc0(sizeof(uint64_t) * spp->block_chunks);
     } else if (spp->vtable_mode == 4){
@@ -3270,9 +3697,18 @@ static void znsssd_init_params(FemuCtrl * n, ZNSParams *spp){
           Stripe allocation
         */
         spp->stripe_chunks = spp->total_stripes / spp->chunk_size;
+        femu_log("stripe chunks %d\n", spp->stripe_chunks);
         spp->zone_stripe_chunks = spp->stripe_chunks / spp->zones;
+        femu_log("zone stripe chunks %d\n", spp->zone_stripe_chunks);
         zns->availability_array = g_malloc0(sizeof(uint8_t) * spp->stripe_chunks);
         zns->wear_array = g_malloc0(sizeof(uint64_t) * spp->stripe_chunks);
+        if (!zns->solver_initialized) {
+            femu_log("Initialize solver\n");
+            if (zns_init_stripe_solver(zns) != 0)
+                return -1;
+        }
+    } else if (spp->vtable_mode == 1 || spp->vtable_mode == 0){
+        zns->wear_array = g_malloc0(sizeof(uint64_t) * spp->block_chunks);
     }
     spp->chunks_per_lun = spp->block_chunks / spp->total_planes; // given that in this implementation we treat plane as LUN
 

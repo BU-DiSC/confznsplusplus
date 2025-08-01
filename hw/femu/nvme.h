@@ -1258,7 +1258,9 @@ typedef struct ZNSParams {
     uint64_t max_chunks_per_lun;/* maximum number of chunks that the LUN may contribute*/
     uint64_t min_luns;          /* minimum number of LUNS that have to contribute to the zone*/
     uint64_t chunk_size;        /* stripe or block chunk size*/
-
+    uint8_t debug;              /* Print detailed I/O info */
+    char *log_path;             /* finish log path*/
+    char *log_path_time;             /* finish log path*/
     // erasure modes
     uint8_t allow_partial_zone_resets;
     uint8_t asynchronous_resets;
