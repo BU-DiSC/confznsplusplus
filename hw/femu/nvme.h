@@ -1247,6 +1247,7 @@ typedef struct ZNSParams {
     uint64_t blocks_per_die;
 
     uint64_t total_chips;       /* # of chips in SSD*/
+    uint64_t total_luns;
     uint64_t total_planes;      /* # of planes in SSD*/
     uint64_t total_blocks;      /* # of erase blocks in SSD*/
     uint64_t total_stripes;     /* # of stripes in SSD*/
@@ -1258,6 +1259,7 @@ typedef struct ZNSParams {
     uint64_t max_chunks_per_lun;/* maximum number of chunks that the LUN may contribute*/
     uint64_t min_luns;          /* minimum number of LUNS that have to contribute to the zone*/
     uint64_t chunk_size;        /* stripe or block chunk size*/
+    uint64_t vchunk_size;        /* stripe or block chunk size*/
     uint8_t debug;              /* Print detailed I/O info */
     char *log_path;             /* finish log path*/
     char *log_path_time;             /* finish log path*/

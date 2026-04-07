@@ -77,6 +77,7 @@ typedef struct zns {
     struct NvmeZone *zone_array;
     struct zns_vtable_entry *ventry;
     uint32_t num_zones;
+    uint32_t plane_ptr;
     /* lockless ring for communication with NVMe IO thread */
     QemuThread zns_thread;
     
@@ -413,6 +414,7 @@ static uint64_t zns_flex_block_advance_status_reset_physical(NvmeRequest *req, Z
 static uint64_t zns_flex_stripe_advance_status_finish(ZNS *zns, NvmeRequest *req);
 
 static uint64_t zns_flex_chunk_advance_status_finish(ZNS *zns, NvmeRequest *req);
+static uint64_t zns_flex_vchunk_advance_status_finish(ZNS *zns, NvmeRequest *req);
 
 static uint64_t zns_flex_block_advance_status_finish(ZNS *zns, NvmeRequest *req);
 
