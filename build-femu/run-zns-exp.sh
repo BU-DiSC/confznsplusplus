@@ -2,7 +2,7 @@
 set -e
 
 # Image directory
-OSIMGF=/home/teona/femu.qcow2
+OSIMGF=/path/to/femu.qcow2
 
 if [ $# -ne 20 ]; then
     echo "Usage: $0 <zns_vtable_mode> <zns_chunk_size> <zns_max_chunks_per_lun> <zns_min_luns> <zns_log_path> <zns_log_path_time> <zns_zonesize> <zns_zonecap> <zns_channels_per_zone> <zns_ways_per_zone> <zns_channels> <zns_ways> <zns_dies_per_chip> <zns_planes_per_die> <zns_block_size_pages> <zns_page_write_latency> <zns_page_read_latency> <zns_channel_transfer_latency> <zns_block_erasure_latency> <devsz_mb>"
